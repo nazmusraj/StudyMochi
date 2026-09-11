@@ -1,30 +1,30 @@
 // ════════════════════════════════════════════════════════════════
-//   স্টাডিমোচি DIRECT — ল্যাপটপ ছাড়া, ESP32 নিজেই গুগলে।
+//   StudyMochi DIRECT — Standalone ESP32 Gemini Live client without a laptop.
 //
 //        ESP32 ──── WiFi ────► Gemini Live API (wss)
 //          ▲                          │
-//          └────── অডিও ফেরত ─────────┘
+//          └────── Audio Return ───────┘
 //
-//   ⚠️ এটা আলাদা স্কেচ। আপনার চলতি studymochi_esp32 কোড অটুট আছে —
-//      এখানে কিছু ভাঙলেও ওটা আগের মতোই কাজ করবে।
+//   ⚠️ This is an independent sketch. Existing studymochi_esp32 code remains untouched —
+//      any changes here will not affect the original firmware.
 //
-//   ▸ লাইব্রেরি: WiFiManager (tzapu)  — এই একটাই লাগবে
-//     (WebSocket নিজেরাই লিখেছি, miniws.cpp দেখুন)
+//   ▸ Library: WiFiManager (tzapu) — only external dependency required
+//     (WebSocket client is custom-built; see miniws.cpp)
 //
-//   ▸ প্রথমবার চালু হলে হটস্পট খুলবে: StudyMochi-Direct / mochi1234
-//     সেখানে WiFi + Gemini API key দিন। NVS-এ জমা থাকবে।
+//   ▸ On first boot, configuration AP launches: StudyMochi-Direct / mochi1234
+//     Enter WiFi credentials and Gemini API key; saved to NVS.
 //
-//   ▸ ওয়্যারিং — আপনার বোর্ডের মতোই:
+//   ▸ Pinout wiring — identical to existing board setup:
 //       INMP441 : SCK=33  WS=25  SD=32   VDD→3V3  L/R→GND
 //       MAX98357A: BCLK=26 LRC=27 DIN=14  VIN→5V   GAIN→GND  SD→VIN
-//       BOOT বাটন চেপে ধরে কথা বলুন
+//       Hold BOOT button to talk
 // ════════════════════════════════════════════════════════════════
 
 #include <WiFi.h>
-// ⚠️ Wire.h এখানে **অবশ্যই** থাকতে হবে, যদিও ব্যবহার হয় face.cpp-তে।
-//    Arduino IDE লাইব্রেরি খোঁজে মূলত .ino ফাইলের #include দেখে।
-//    শুধু face.cpp-তে লিখলে IDE Wire লাইব্রেরির পথটা যোগ করে না,
-//    আর তখন "Wire.h: No such file or directory" আসে।
+// ⚠️ Wire.h MUST be included here even though it is used in face.cpp.
+//    The Arduino IDE resolves library dependencies by scanning the main .ino file.
+//    If included only in face.cpp, the IDE fails to link the Wire library path,
+//    resulting in "Wire.h: No such file or directory".
 #include <Wire.h>
 #include <WiFiManager.h>
 #include <Preferences.h>
@@ -36,7 +36,7 @@
 #include "rtcclock.h"
 #include "weather.h"
 
-// ───────────────────── সেটিং ─────────────────────
+// ───────────────────── Configuration ─────────────────────
 #define AP_NAME    "StudyMochi-Direct"
 #define AP_PASS    "mochi1234"
 
@@ -47,75 +47,75 @@
 #define AMP_LRC    27
 #define AMP_DIN    14
 // ───── OLED ─────
-// আপনার ল্যাপটপ-ফার্মওয়্যারের মতোই পিন। OLED না লাগালেও কোড
-// চলবে — faceBegin() false দেবে, আর মুখের সব ফাংশন চুপচাপ
-// কিছু না করে ফিরে যাবে।
+// Same pins as laptop-connected firmware. Code executes normally even if OLED
+// is disconnected — faceBegin() returns false, and all display routines
+// safely exit as no-ops.
 #define OLED_SDA   21
 #define OLED_SCL   22
 #define OLED_ADDR  0x3C
 
-// ───── টাচ সেন্সর (TTP223 × ২) ─────
-// প্রতিটায় ৩টা তার:  VCC→3V3   GND→GND   OUT→নিচের GPIO
+// ───── Touch Sensors (TTP223 x 2) ─────
+// 3 wires per sensor: VCC->3V3 GND->GND OUT->GPIO specified below
 //
-//   টাচ-১ (GPIO 18) : চেপে ধরে কথা বলুন — BOOT বাটনের মতোই
-//   টাচ-২ (GPIO 19) : একবার ছুঁলে পর্দা বদলায়
-//                     মুখ → ঘড়ি → আবহাওয়া → পমোডোরো
-//                     পমোডোরোর পর্দায় **চেপে ধরলে** টাইমার চালু/বন্ধ
+//   Touch-1 (GPIO 18) : Hold to talk — functions identically to BOOT button
+//   Touch-2 (GPIO 19) : Long press switches screens, single tap triggers screen action
+//                     Face -> Clock -> Weather -> Pomodoro -> Timer
+//                     Long press switches screen; tap executes current screen action
 //
-// মডিউল উল্টো হলে (ছুঁলে LOW) touch.h-এ TOUCH_ACTIVE_LOW 1 করুন।
+// If module is active LOW, configure TOUCH_ACTIVE_LOW 1 in touch.h.
 #define TOUCH_TALK 18
 #define TOUCH_MENU 19
 
-// ───── পমোডোরো ─────
-// ───── টাইমার ─────
-#define TMR_STEP_MIN      5        // এক চাপে কত মিনিট বাড়ে
-#define TMR_MAX_MIN      60        // এর পরে ০ (মানে বাদ)
-#define TMR_SET_WAIT_MS 3000       // বসানোর পর চুপ থাকলে কতক্ষণে চালু
+// ───── Pomodoro ─────
+// ───── Timer ─────
+#define TMR_STEP_MIN      5        // Minutes added per tap
+#define TMR_MAX_MIN      60        // Reset threshold (exceeding rolls back to 0)
+#define TMR_SET_WAIT_MS 3000       // Idle timeout before auto-start after setting
 
 #define POMO_WORK_SEC  (25 * 60)
 #define POMO_BREAK_SEC (5 * 60)
 
-// ───── আবহাওয়ার জায়গা (ঢাকা) ─────
-// পোর্টাল থেকে বদলানো যায়
+// ───── Weather Location (Dhaka default) ─────
+// Configurable via setup portal
 #define WX_LAT_DEFAULT 23.8103f
 #define WX_LON_DEFAULT 90.4125f
 
-#define BTN_PIN    0            // BOOT বাটন — কথা বলার জন্য (ব্যাকআপ)
+#define BTN_PIN    0            // BOOT button — talk trigger (backup)
 #define LED_PIN    2
 
-// ───── রিসেট বাটন ─────
-// এক পা GPIO 4-এ, আরেক পা GND-তে। ভেতরের pull-up ব্যবহার হয়,
-// তাই রেজিস্টর লাগবে না। বাটন না লাগালেও কোড চলবে (পিন HIGH থাকবে)।
+// ───── Reset Button ─────
+// One pin to GPIO 4, other pin to GND. Uses internal pull-up resistor;
+// no external resistor required. Works safely even if unpopulated (floats HIGH).
 //
-// ৩ সেকেন্ড চেপে ধরলে WiFi + API key মুছে সেটআপ মোডে ফিরে যাবে।
-// LED দ্রুত জ্বলে-নিভে বুঝিয়ে দেবে কতটা এগিয়েছে।
+// Holding 3 seconds clears WiFi + API key and reboots into setup portal.
+// Blinking LED signals progress during hold.
 #define RESET_PIN      4
 #define RESET_HOLD_MS  3000
 
-#define MIC_RATE   16000        // Live API-র নিয়ম
-#define OUT_RATE   24000        // Live API যা ফেরত দেয়
-// আপনার আসল রেকর্ডিং মেপে এই মান বেরিয়েছে।
-// logs\esp32-in-20260906-*.wav — gain ১৬-তে rms ছিল −৫.৪ dBFS আর
-// **২২.৮% স্যাম্পল কেটে গিয়েছিল**। কথার জন্য চাই rms ≈ −২০ dBFS।
-// ১৫ dB কমাতে হবে, মানে গেইন ৫.৪ গুণ কম → ১৬ ÷ ৫.৪ ≈ ৩।
+#define MIC_RATE   16000        // Required by Gemini Live API (16 kHz 16-bit mono PCM)
+#define OUT_RATE   24000        // Gemini Live API return sample rate (24 kHz 16-bit mono PCM)
+// Calibrated from recorded log measurements:
+// logs/esp32-in-*.wav: At gain 16, RMS was -5.4 dBFS with
+// 22.8% clipped samples. Speech target is RMS ≈ -20 dBFS.
+// Attenuating by 15 dB implies ~5.4x lower gain: 16 / 5.4 ≈ 3.
 #define MIC_GAIN   3
 #define MIC_HPF_HZ 120
 
-// মাইক কতটা জোরে ধরবে সেটা এখন **নিজে নিজে** ঠিক হয়:
-//  · কোনো স্যাম্পল CLIP_AT ছাড়ালে সাথে সাথে গেইন নামে (কেটে যাওয়ার
-//    চেয়ে একটু চাপা ভালো — কাটা গেলে গলা চেনাই যায় না)
-//  · পুরো টার্ন খুব চাপা হলে পরেরবার গেইন ওঠে
-//  · যা ঠিক হলো তা NVS-এ থাকে, পরের বার আর খুঁজতে হয় না
-#define CLIP_AT    20000        // −৪ dBFS — এর ওপরে গেলে বিপদ
-#define AIM_LOUD   11000        // কেটে গেলে এখানে নামিয়ে আনি (−৯ dBFS)
-#define AIM_RMS    3000         // টার্ন শেষে গড় আওয়াজ এখানে আনার চেষ্টা
-                                // (−২০ dBFS — কথার জন্য এটাই আদর্শ)
+// Microphone input sensitivity dynamically self-calibrates:
+//  - If any sample exceeds CLIP_AT, gain immediately decreases (clipping
+//    severely impairs speech recognition)
+//  - If overall turn amplitude is quiet, gain incrementally increases for next turn
+//  - Calibrated gain is persisted in NVS across power cycles
+#define CLIP_AT    20000        // -4 dBFS — clipping danger threshold
+#define AIM_LOUD   11000        // Target ceiling upon clipping (-9 dBFS)
+#define AIM_RMS    3000         // Target RMS at end of turn (-20 dBFS ideal for speech)
+                                // (-20 dBFS — ideal for speech recognition)
 #define GAIN_MIN   1
 #define GAIN_MAX   4096
 
-// একবারে কত অডিও পাঠাব। ১৬০০ স্যাম্পল = ঠিক ১০০ ms।
-// আগে ২৫৬ স্যাম্পল (১৬ ms) করে পাঠাতাম — সেকেন্ডে ৬২টা আলাদা
-// মেসেজ, প্রতিটায় নতুন String। সেটাই লাইন কাটার বড় কারণ ছিল।
+// Audio chunk size per transmit. 1600 samples = exactly 100 ms.
+// Previously sent 256 samples (16 ms) — generating 62 messages/sec, each allocating
+// a new String, causing heap fragmentation and socket disconnects.
 #define CHUNK_SAMPLES  1600
 
 #define GEM_HOST   "generativelanguage.googleapis.com"
@@ -127,64 +127,64 @@
 #define I2S_AMP    I2S_NUM_1
 #define I2S_WAIT   pdMS_TO_TICKS(200)
 
-// ───────────────────── অবস্থা ─────────────────────
+// ───────────────────── State Variables ─────────────────────
 static Preferences prefs;
 static MiniWS ws;
 static char    gApiKey[140] = "";
-static bool    gReady   = false;      // setupComplete পেয়েছি
-static bool    gTalking = false;      // এখন রেকর্ড হচ্ছে
+static bool    gReady   = false;      // Received setupComplete
+static bool    gTalking = false;      // Currently recording
 static bool    gMicOk = false, gAmpOk = false;
 static uint32_t gPlayed = 0;
-static uint32_t gSentMs = 0;          // এই টার্নে কত ms অডিও গেল
-static int32_t  gPeak   = 0;          // এই টার্নে মাইকের সর্বোচ্চ (গেইনের পরে)
-static int32_t  gRawPeak = 0;         // গেইনের আগে, কাঁচা মান
-static uint32_t gClips  = 0;          // কতবার কেটে গেল
-static uint64_t gSumSq  = 0;          // rms হিসেবের জন্য
+static uint32_t gSentMs = 0;          // Milliseconds of audio transmitted in this turn
+static int32_t  gPeak   = 0;          // Peak microphone amplitude this turn (post-gain)
+static int32_t  gRawPeak = 0;         // Raw microphone peak before gain
+static uint32_t gClips  = 0;          // Count of clipped samples
+static uint64_t gSumSq  = 0;          // Sum of squares for RMS calculation
 static uint32_t gNSamp  = 0;
-static uint32_t gWaitSince = 0;       // activityEnd-এর পর অপেক্ষা শুরু
-static bool     gGotAudio = false;    // এই টার্নে উত্তরে অডিও এসেছে কি
-static uint32_t gTurnAudio = 0;       // এই টার্নে মোট কত বাইট বাজল
-static uint32_t gTurnT0 = 0;          // উত্তর আসা শুরু হয়েছিল কখন
-static String   gHeard, gSaid;        // পুরো টার্নের লেখা, একবারে ছাপব
-static int32_t  gGain   = MIC_GAIN;   // চলতি গেইন (NVS-এ জমা থাকে)
-static int32_t  gGainStart = MIC_GAIN; // এই টার্ন যেটা দিয়ে শুরু হয়েছিল
+static uint32_t gWaitSince = 0;       // Timestamp when waiting started after activityEnd
+static bool     gGotAudio = false;    // Whether response audio was received this turn
+static uint32_t gTurnAudio = 0;       // Total audio bytes played back this turn
+static uint32_t gTurnT0 = 0;          // Timestamp when response started streaming
+static String   gHeard, gSaid;        // Turn transcripts buffered for atomic printing
+static int32_t  gGain   = MIC_GAIN;   // Current gain setting (persisted in NVS)
+static int32_t  gGainStart = MIC_GAIN; // Initial gain setting when this turn started
 
-// ───── টাচ, ঘড়ি, আবহাওয়া, পমোডোরো ─────
+// ───── Touch, Clock, Weather, Pomodoro ─────
 static Touch    tTalk, tMenu;
 static float    gLat = WX_LAT_DEFAULT, gLon = WX_LON_DEFAULT;
-static uint32_t gClockTick = 0;         // সেকেন্ডে একবার পর্দা নতুন করে
+static uint32_t gClockTick = 0;         // Refresh screen once per second
 static bool     gPomoRun = false, gPomoBreak = false;
 static int      gPomoLeft = POMO_WORK_SEC;
 static int      gPomoRounds = 0;
 static uint32_t gPomoTick = 0;
-static bool     gSpeakOnIdle = false;   // পমোডোরো শেষে মোচি কথা বলবে
+static bool     gSpeakOnIdle = false;   // Mochi speaks announcement once idle after pomodoro
 static char     gSpeakWhat[160] = "";
 
-// ───── টাইমার ─────
-// পমোডোরো ২৫ মিনিটেই বাঁধা। টাইমারটা নিজের ইচ্ছেমতো —
-// টাইমারের পর্দায় টাচ ২ ছুঁয়ে সময় বসানো হয়।
+// ───── Timer ─────
+// Pomodoro is fixed at 25/5 minutes. Timer is customizable —
+// duration adjusted by tapping Touch-2 on the timer screen.
 static TimerMode gTmrMode = TM_IDLE;
-static int       gTmrLeft = 0;          // বাকি সেকেন্ড
-static int       gTmrTotal = 0;         // শুরুতে যা বসানো ছিল
-static int       gTmrSetMin = 0;        // বসানোর ভঙ্গিতে এখনকার মিনিট
+static int       gTmrLeft = 0;          // Remaining seconds
+static int       gTmrTotal = 0;         // Initial duration in seconds
+static int       gTmrSetMin = 0;        // Current minutes in setting mode
 static uint32_t  gTmrTick = 0;
-static uint32_t  gTmrBlink = 0;         // শেষ হলে পর্দা জ্বলে-নেভে
+static uint32_t  gTmrBlink = 0;         // Display flash state when timer expires
 static bool      gTmrBlinkOn = true;
-static int       gTmrBeeps = 0;         // আর কতগুলো বিপ বাকি
+static int       gTmrBeeps = 0;         // Remaining alert beeps
 static uint32_t  gTmrBeepAt = 0;
 
 static int32_t rawBuf[256];
 static int16_t pcmBuf[CHUNK_SAMPLES];
 static size_t  pcmFill = 0;
 
-// অডিও মেসেজ এখানেই বানাই — String নয়, তাই heap নড়ে না।
+// Audio message template formatted in-place — no String heap churn.
 // prefix(70) + base64(4268) + suffix(4) + '\0'  ≈ 4343
-// SDK data আগে, mimeType পরে পাঠায় — আমরাও তাই
+// Official SDK sends data before mimeType — preserve this order
 static const char AUD_PRE[]  = "{\"realtime_input\":{\"audio\":{\"data\":\"";
 static const char AUD_POST[] = "\",\"mimeType\":\"audio/pcm;rate=16000\"}}}";
 static char msgBuf[4608];
 
-// হাই-পাস ফিল্টার (DC + ৫০Hz হাম কাটে)
+// High-pass filter (removes DC offset and 50Hz mains hum)
 static float hpR = 0, hx1 = 0, hy1 = 0, hx2 = 0, hy2 = 0;
 static inline float hpf(float v) {
   float o1 = v  - hx1 + hpR * hy1; hx1 = v;  hy1 = o1;
@@ -192,9 +192,9 @@ static inline float hpf(float v) {
   return o2;
 }
 
-// এক স্যাম্পল: গেইন → লিমিটার → হাই-পাস → ক্ল্যাম্প।
-// লিমিটারটাই আসল কথা — কেটে যাওয়া গলা Gemini চিনতে পারে না, তাই
-// প্রথম যে স্যাম্পলটা বিপদসীমা ছোঁয়, তখনই গেইন নামিয়ে দিই।
+// Process one audio sample: Gain -> Limiter -> High-pass -> Clamp.
+// The limiter is critical — clipping severely degrades recognition accuracy,
+// so gain is reduced the moment a sample exceeds the safety threshold.
 static int16_t micSample(int32_t raw) {
   int32_t ra = raw < 0 ? -raw : raw;
   if (ra > gRawPeak) gRawPeak = ra;
@@ -214,38 +214,38 @@ static int16_t micSample(int32_t raw) {
   if (s < -32768) s = -32768;
   a = s < 0 ? -s : s;
   if (a > gPeak) gPeak = a;
-  gSumSq += (uint64_t)((int64_t)s * (int64_t)s);   // rms-এর জন্য
+  gSumSq += (uint64_t)((int64_t)s * (int64_t)s);   // Accumulate for RMS
   gNSamp++;
   return (int16_t)s;
 }
 
-// টার্নে গড় আওয়াজ কত ছিল
+// Average amplitude over the turn
 static int32_t turnRms() {
   if (!gNSamp) return 0;
   return (int32_t)sqrt((double)(gSumSq / gNSamp));
 }
 
-// ───── আগে থেকে জানিয়ে রাখি (setup() এগুলো ডাকে) ─────
+// ───── Forward Declarations (invoked by setup()) ─────
 static void showHelp();
 static void factoryReset(const char *why);
 static void saveGain();
 static void planRetry(const char *why, uint32_t ms);
 static void turnReport();
 static void beep(int hz, int ms, int amp);
-static void tmrClear();                 // Serial-এর 'k' এর আগেই লাগে
+static void tmrClear();                 // Needed before Serial 'k' handler
 
-// ───── কত পরে আবার সেশন খুলব ─────
-// ⚠️ এটাই আগের সবচেয়ে বড় ভুল ছিল। সংযোগ কাটলেই আমি **২ সেকেন্ড**
-// পরে নতুন সেশন খুলতাম। ফ্রি টিয়ারে পরপর নতুন সেশন খোলা যায় না —
-// তাই সারাদিনে শত শত চেষ্টা কোটা শেষ করে দিত, আর তখন ল্যাপটপ
-// ভার্সনও উত্তর পেত না। এখন ব্যর্থ হলে অপেক্ষা দ্বিগুণ হতে থাকে।
-static uint32_t gNextTry = 0;         // এর আগে আর চেষ্টা করব না
-static uint32_t gBackoff = 0;         // এখনকার অপেক্ষা (ms)
+// ───── Exponential Reconnect Backoff ─────
+// ⚠️ Exponential backoff prevents rapid reconnect loops that exhaust
+// API rate limits on free-tier quotas when network connections drop.
+// When connection fails, retry delay doubles up to maximum backoff ceiling.
+//
+static uint32_t gNextTry = 0;         // Next connection attempt timestamp
+static uint32_t gBackoff = 0;         // Current backoff delay in milliseconds
 static uint32_t gLastWaitMsg = 0;
 
 // ───────────────────── I2S ─────────────────────
 static void fillPins(i2s_pin_config_t &p, int bck, int wsp, int dout, int din) {
-  memset(&p, 0xFF, sizeof(p));          // সব -1, mck_io_num সহ
+  memset(&p, 0xFF, sizeof(p));          // Initialize all pins to -1 including mck_io_num
   p.bck_io_num = bck; p.ws_io_num = wsp;
   p.data_out_num = dout; p.data_in_num = din;
 }
@@ -272,12 +272,12 @@ static bool ampBegin() {
   c.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
   c.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   c.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  // ⚠️ ৮ নয়, ১৬ বাফার। কেন:
-  // গুগল ৪০ ms করে টুকরো পাঠায়, কিন্তু নেট সবসময় সমান তালে আসে না।
-  // ৮টা বাফার মানে মোটে ৮৫ ms জমা থাকে — একটা টুকরো একটু দেরি
-  // করলেই DMA খালি, আর কানে সেটা ঘড়ঘড়ে/ঘোলাটে শোনায়।
-  // ১৬টায় ১৭০ ms জমা থাকে, নেটের এই এদিক-ওদিক সয়ে যায়।
-  // দাম: ৮ KB RAM। আমাদের ~৭০ KB ফাঁকা, তাই সমস্যা নেই।
+  // ⚠️ 16 DMA buffers instead of 8:
+  // Google streams 40 ms audio chunks, but network jitter varies packet arrival.
+  // 8 buffers provide only ~85 ms buffering — a brief packet delay empties DMA,
+  // resulting in audible audio stuttering and glitching.
+  // 16 buffers store ~170 ms, comfortably absorbing network jitter.
+  // Memory cost: 8 KB RAM (ample free memory available).
   c.dma_buf_count = 16; c.dma_buf_len = 256;
   c.use_apll = false; c.tx_desc_auto_clear = true;
   i2s_pin_config_t p; fillPins(p, AMP_BCLK, AMP_LRC, AMP_DIN, I2S_PIN_NO_CHANGE);
@@ -287,19 +287,19 @@ static bool ampBegin() {
   return true;
 }
 
-// ── ভলিউম ──
-// Gemini-র উত্তরের অডিও প্রায় সর্বোচ্চ জোরে আসে (peak ৩২৩২৩ / ৩২৭৬৭)।
-// MAX98357A-তে GAIN পিন GND-তে মানে আরও ১২ dB। ছোট স্পিকারে সেটা
-// অ্যামপ বা কোনকে সীমা ছাড়িয়ে দেয় — কানে "ঘোলাটে/ফাটা" লাগে।
-// তাই বাজানোর আগে একটু কমিয়ে নিই। v কমান্ড দিয়ে বদলানো যায়।
-static int gVol = 70;                    // ০–১০০
+// ── Playback Volume ──
+// Gemini audio arrives near full digital scale (peak ~32323 / 32767).
+// With GAIN pin tied to GND, MAX98357A adds +12 dB. Small speakers
+// may distort or clip. Attenuate before I2S playback.
+// Adjustable at runtime using the 'v' Serial command.
+static int gVol = 70;                    // 0-100% volume scale
 
-// এই লুপটা এমনিতেই প্রতিটা স্যাম্পল ছুঁয়ে যায়, তাই সাথে সাথে
-// জোরটাও মেপে নিই — ঠোঁট নড়ানোর জন্য আলাদা খরচ লাগে না।
-static uint8_t gEnv = 0;                 // ০..২৫৫
+// The playback scaling loop touches every sample, allowing amplitude envelope
+// measurement for lip-sync at zero additional CPU cost.
+static uint8_t gEnv = 0;                 // Amplitude envelope (0..255)
 
 static void applyVol(uint8_t *b, size_t n) {
-  int16_t *s = (int16_t *)b;             // pcm বাফার 4-বাইট aligned
+  int16_t *s = (int16_t *)b;             // PCM buffer is 4-byte aligned
   size_t m = n / 2;
   int32_t peak = 0;
   for (size_t i = 0; i < m; i++) {
@@ -308,10 +308,10 @@ static void applyVol(uint8_t *b, size_t n) {
     if (v < 0) v = -v;
     if (v > peak) peak = v;
   }
-  // কথার শীর্ষ সাধারণত পুরো মাপের ~অর্ধেক, তাই ২ গুণ করে ছড়িয়ে দিই
+  // Speech peaks typically occupy ~half dynamic range; scale by 2 for lip-sync sensitivity
   int32_t e = peak * 2 / 129;            // 32767*2/129 ≈ 508 -> clamp
   if (e > 255) e = 255;
-  // চট করে ওঠে, ধীরে নামে — নইলে ঠোঁট কাঁপতে থাকে
+  // Fast attack, slow decay filter — prevents erratic mouth jittering
   gEnv = (e > gEnv) ? (uint8_t)e : (uint8_t)((gEnv * 3 + e) / 4);
 }
 
@@ -323,26 +323,26 @@ static void speakerWrite(const uint8_t *d, size_t n) {
     size_t w = 0;
     if (i2s_write(I2S_AMP, d + done, n - done, &w, I2S_WAIT) != ESP_OK) break;
     done += w;
-    if (w == 0 && millis() - t0 > 500) break;   // জ্যাম — বোর্ড ঝোলাব না
+    if (w == 0 && millis() - t0 > 500) break;   // DMA buffer timeout — avoid hanging
   }
 }
 
-// ───────────────────── Live API: পাঠানো ─────────────────────
-// ⚠️⚠️ নিচের JSON-গুলোর বানান নিজে থেকে "সুন্দর" করতে যাবেন না।
+// ───────────────────── Live API: Transmission ─────────────────────
+// ⚠️⚠️ Do NOT modify the case conventions of the JSON keys below.
 //
-// ল্যাপটপের পাইথন কোড (google-genai SDK) যেটা দিয়ে সব ঠিকঠাক কাজ
-// করছিল, সেটা তারে ঠিক কী পাঠায় — আমরা সেটা ধরে দেখেছি। ফল:
+// Live API schema requires an exact mixture of snake_case and camelCase:
+// verified by capturing live payloads sent by the official google-genai SDK:
 //
-//   {"realtime_input":{"activityStart":{}}}          ← বাইরে snake_case,
-//   {"client_content":{"turns":[...],"turnComplete":true}}   ভেতরে camelCase
-//   setup-এর ভেতরে speechConfig / realtimeInputConfig-এর
-//   নিচের ফিল্ডগুলোও snake_case: voice_config, voice_name,
+//   {"realtime_input":{"activityStart":{}}}          <- outer snake_case,
+//   {"client_content":{"turns":[...],"turnComplete":true}}   inner camelCase
+// Sub-fields under setup speechConfig / realtimeInputConfig
+// also use snake_case: voice_config, voice_name, etc.
 //   automatic_activity_detection, language_codes
 //
-// আগে আমি সব camelCase করে পাঠাতাম ("realtimeInput")। handshake আর
-// setup তাতে টিকে যেত, কিন্তু অডিওর মেসেজগুলো সার্ভার আমলে নিত না —
-// তাই Gemini নীরবতা শুনত আর কিছু না বলেই turnComplete পাঠাত।
-// এখন হুবহু SDK-র মতো, অক্ষরে অক্ষরে।
+// Sending pure camelCase ("realtimeInput") accepted the handshake but
+// silently dropped audio chunks, causing Gemini to hear silence.
+// Now matched byte-for-byte to the official SDK.
+//
 static bool sendSetup() {
   String s = F("{\"setup\":{\"model\":\"");
   s += GEM_MODEL;
@@ -373,12 +373,12 @@ static bool sendActivity(bool start) {
   return ws.sendText(m, strlen(m));
 }
 
-// মাইক ছাড়াই একটা প্রশ্ন পাঠায় — Serial-এ  t <proshno>
-// মোচি এতে মুখে উত্তর দিলে বোঝা যায় গুগল, স্পিকার, সব ঠিক আছে;
-// সমস্যা শুধু মাইকের অডিওতে।
+// Sends a test question without microphone — Serial command: t <question>
+// Validates WiFi, Gemini Live API, and audio playback pipeline independently
+// of microphone input hardware.
 static bool sendTextTurn(const char *q) {
   String s = F("{\"client_content\":{\"turns\":[{\"parts\":[{\"text\":\"");
-  for (const char *p = q; *p; p++) {          // JSON ভাঙতে পারে এমন অক্ষর বাদ
+  for (const char *p = q; *p; p++) {          // Filter characters that could corrupt JSON payload
     if (*p == '"' || *p == '\\') continue;
     if ((unsigned char)*p < 0x20) continue;
     s += *p;
@@ -388,12 +388,12 @@ static bool sendTextTurn(const char *q) {
   return ws.sendText(s);
 }
 
-// ১০০ ms অডিও base64 করে পাঠায়। base64 সরাসরি msgBuf-এর ভেতরে
-// লেখা হয় — আলাদা বাফার বা String লাগে না।
+// Encodes 100 ms audio chunk to base64 directly inside msgBuf —
+// avoids intermediate buffer allocations or String objects.
 static bool sendAudioChunk(const int16_t *pcm, size_t samples) {
   const size_t pre  = sizeof(AUD_PRE)  - 1;
   const size_t post = sizeof(AUD_POST) - 1;
-  size_t room = sizeof(msgBuf) - pre - post;      // '\0'-এর জায়গাও এর ভেতরে
+  size_t room = sizeof(msgBuf) - pre - post;      // Accommodates trailing null byte
 
   size_t outLen = 0;
   if (mbedtls_base64_encode((unsigned char *)msgBuf + pre, room, &outLen,
@@ -401,19 +401,19 @@ static bool sendAudioChunk(const int16_t *pcm, size_t samples) {
     Serial.println("[api] base64 buffer chhoto — chunk baad");
     return false;
   }
-  memcpy(msgBuf, AUD_PRE, pre);                   // base64-এর পরেই prefix বসাই
-  memcpy(msgBuf + pre + outLen, AUD_POST, post);  // mbedtls-এর '\0' ঢেকে দিই
+  memcpy(msgBuf, AUD_PRE, pre);                   // Prepend JSON message prefix
+  memcpy(msgBuf + pre + outLen, AUD_POST, post);  // Overwrite mbedtls trailing null with JSON suffix
   return ws.sendText(msgBuf, pre + outLen + post);
 }
 
-// শেষে একটু নীরবতা — নইলে DMA-তে পড়ে থাকা টুকরোটা "টক" করে বাজে
+// Append brief silence flush — prevents audible DAC pop from lingering DMA samples
 static void speakerSilence() {
   if (!gAmpOk) return;
   static const uint8_t z[512] = {0};
   for (int i = 0; i < 4; i++) speakerWrite(z, sizeof(z));
 }
 
-// একটা বিপ — তার আর অ্যামপ ঠিক আছে কি না, এক সেকেন্ডে বলে দেয়
+// Test beep — verifies I2S amplifier and speaker connectivity in 1 second
 static void beep(int hz, int ms, int amp) {
   if (!gAmpOk) {
     Serial.println("[i2s] amp chalu nei — beep bajano gelo na");
@@ -426,7 +426,7 @@ static void beep(int hz, int ms, int amp) {
     int n = (total - done) < 256 ? (total - done) : 256;
     for (int i = 0; i < n; i++) {
       float t = (float)(done + i) / OUT_RATE;
-      float env = 1.0f;                       // শুরু/শেষে মৃদু ফেড
+      float env = 1.0f;                       // Smooth envelope fade-in / fade-out
       if (done + i < 400)           env = (done + i) / 400.0f;
       if (total - (done + i) < 400) env = (total - (done + i)) / 400.0f;
       chunk[i] = (int16_t)(amp * env * sinf(2.0f * PI * hz * t));
@@ -438,11 +438,11 @@ static void beep(int hz, int ms, int amp) {
   speakerSilence();
 }
 
-// টার্ন শেষে একবারেই সব খবর — অডিও বাজার সময় Serial চুপ থাকে
+// Turn completion summary — printed atomically after playback completes
 static void turnReport() {
   speakerSilence();
-  float sec  = gTurnAudio / (2.0f * OUT_RATE);          // কত সেকেন্ড কথা
-  float wall = (millis() - gTurnT0) / 1000.0f;          // আসতে কত লাগল
+  float sec  = gTurnAudio / (2.0f * OUT_RATE);          // Spoken audio duration (seconds)
+  float wall = (millis() - gTurnT0) / 1000.0f;          // Elapsed wall clock latency (seconds)
   Serial.printf("[api] turnComplete — %u byte, %.1fs audio, %.1fs-e elo\n",
                 (unsigned)gTurnAudio, sec, wall);
   if (gHeard.length()) { Serial.print("[shunlam] "); Serial.println(gHeard); }
@@ -458,42 +458,42 @@ static void turnReport() {
   faceSetMsg(MSG_BOLUN);
 }
 
-// ───────────────────── Live API: গ্রহণ ─────────────────────
-// পুরো ফ্রেম RAM-এ না রেখে বাইট-বাই-বাইট পড়ি। "data":"..." পেলে
-// base64 ডিকোড করে সাথে সাথেই I2S-এ পাঠিয়ে দিই।
+// ───────────────────── Live API: Reception ─────────────────────
+// Stream-parses frames byte-by-byte. When matching "data":"...",
+// decodes base64 in 4-byte chunks and pushes directly to I2S DMA.
 static void handleServerFrame(uint64_t len) {
   (void)len;
-  // ছোট ছোট জিনিস খোঁজার জন্য একটা স্লাইডিং জানালা
+  // Sliding window buffer for key pattern matching
   char win[24] = {0};
   int  wl = 0;
 
-  bool inData = false;          // "data":" এর ভেতরে আছি
-  bool sawInline = false;       // inlineData দেখেছি (অডিও, টেক্সট নয়)
-  char q[4]; int qn = 0;        // base64-এর ৪ অক্ষর জমে
+  bool inData = false;          // Currently inside audio payload ("data":"...")
+  bool sawInline = false;       // Observed inlineData (audio stream, not transcript text)
+  char q[4]; int qn = 0;        // Accumulates 4 base64 characters
   uint8_t pcm[768] __attribute__((aligned(4))); size_t pn = 0;
   uint32_t audioBytes = 0;
-  String textOut;               // transcription (ছোট)
+  String textOut;               // Transcript text snippet
   bool inText = false;
-  bool inputTx = false;         // এখনকার transcription-টা কার — আমার না মোচির
+  bool inputTx = false;         // Distinguishes user input transcription vs Mochi response
   bool textIsInput = false;
 
-  // ⚠️ আগে আমি হুবহু "data":" আর "text":" খুঁজতাম — মাঝে একটাও
-  //    ফাঁকা জায়গা থাকলে চিনতাম না। JSON-এ ' "data" : " ' লেখা
-  //    সমান বৈধ। ফলে turnComplete ধরা পড়ত (ওটা নিছক শব্দ, কোট
-  //    লাগে না) কিন্তু অডিও আর কথা দুটোই হাতছাড়া হয়ে যেত —
-  //    ঠিক যা আপনার বোর্ডে হচ্ছিল। এখন key পাওয়ার পর ':' আর
-  //    '"'-এর মাঝের ফাঁকা জায়গা টপকে যাই।
+  // ⚠️ Tolerates flexible whitespace: handles "data":" as well as "data" : "
+  //    without desynchronizing the streaming parser.
+  //
+  //
+  //
+  //
   enum { W_NONE, W_DATA, W_TEXT } waitVal = W_NONE;
-  int waitStage = 0;            // 0 = ':' খুঁজছি, 1 = খোলা '"' খুঁজছি
+  int waitStage = 0;            // 0 = seeking ':', 1 = seeking opening quote '"'
   bool turnDone = false;
 
-  // ফ্রেমের শুরুর দিকটা আলাদা করে রাখি — সার্ভার কোনো error পাঠালে
-  // এখানেই থাকবে, আর তখন আমরা সেটা ছাপিয়ে দিতে পারব।
+  // Save frame head for error diagnostics if server rejects request
+  //
   char head[200]; size_t hn = 0;
 
   auto flush = [&]() { if (pn) { applyVol(pcm, pn);
                                speakerWrite(pcm, pn);
-                               faceMouth(gEnv);        // ⭐ ঠোঁট নড়ে
+                               faceMouth(gEnv);        // ⭐ Lip-sync mouth animation
                                audioBytes += pn; pn = 0; } };
 
   while (true) {
@@ -501,7 +501,7 @@ static void handleServerFrame(uint64_t len) {
     if (c < 0) break;
 
     if (inData) {
-      if (c == '"') {                        // অডিও শেষ
+      if (c == '"') {                        // End of base64 audio payload
         inData = false; qn = 0; flush();
         continue;
       }
@@ -527,9 +527,9 @@ static void handleServerFrame(uint64_t len) {
       if (c == '"') {
         inText = false;
         if (textOut.length()) {
-          // ⚠️ এখানে ছাপি না — অডিও বাজার মাঝখানে Serial-এ লেখা
-          //    মানে I2S-এর DMA খালি হয়ে যাওয়া, আর তখন শব্দ কেটে
-          //    যায়। জমিয়ে রাখি, টার্ন শেষে একবারে ছাপব।
+          // ⚠️ Do not print Serial output during playback: UART delays starve
+          //    I2S DMA and cause audio glitching. Buffer and print after turn completes.
+          //
           String &box = textIsInput ? gHeard : gSaid;
           if (box.length() < 300) box += textOut;
           textOut = "";
@@ -541,12 +541,12 @@ static void handleServerFrame(uint64_t len) {
       continue;
     }
 
-    // ── key পেয়েছি, এখন তার মানটার শুরু খুঁজছি ──
+    // ── Key matched; now seeking value token ──
     if (waitVal != W_NONE) {
       if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
       if (waitStage == 0) {
         if (c == ':') { waitStage = 1; continue; }
-        waitVal = W_NONE;                     // ভুল করে ধরেছিলাম
+        waitVal = W_NONE;                     // False match — reset
       } else {
         if (c == '"') {
           if (waitVal == W_DATA) { inData = true; sawInline = false; qn = 0; }
@@ -554,11 +554,11 @@ static void handleServerFrame(uint64_t len) {
           waitVal = W_NONE; wl = 0; win[0] = 0;
           continue;
         }
-        waitVal = W_NONE;                     // null ইত্যাদি — ছেড়ে দিই
+        waitVal = W_NONE;                     // Non-string token (e.g. null) — ignore
       }
     }
 
-    // ── জানালা সরাই ──
+    // ── Shift Sliding Window ──
     if (wl < (int)sizeof(win) - 1) win[wl++] = (char)c;
     else { memmove(win, win + 1, sizeof(win) - 2); win[sizeof(win) - 2] = (char)c; }
     win[wl < (int)sizeof(win) ? wl : (int)sizeof(win) - 1] = 0;
@@ -572,10 +572,10 @@ static void handleServerFrame(uint64_t len) {
     else if (strstr(win, "turnComplete")) {
       gWaitSince = 0;
       if (gGotAudio) {
-        turnDone = true;                 // ছাপাছাপি ফ্রেম শেষ হলে
+        turnDone = true;                 // Turn complete — print summaries after frame
       } else {
-        // মডেল টার্ন শেষ বলল কিন্তু একটা শব্দও বলল না — মানে সে
-        // যা শুনেছে তাতে কথা খুঁজে পায় নি।
+        // Turn concluded with no spoken audio (e.g. silence or unrecognized input)
+        //
         Serial.println("[api] turnComplete — kintu KONO UTTOR DEY NI.");
         Serial.println("      upore [shunlam] line achhe ki?");
         Serial.println("        · achhe  -> Gemini kotha shuneche, uttor dey ni");
@@ -599,7 +599,7 @@ static void handleServerFrame(uint64_t len) {
   ws.endFrame();
   head[hn] = 0;
 
-  // সার্ভার কোনো ভুল ধরিয়ে দিলে সেটা চোখে পড়া দরকার
+  // Server returned an error message — print for visibility
   if (strstr(head, "error") || strstr(head, "Error") ||
       strstr(head, "INVALID") || strstr(head, "PERMISSION")) {
     Serial.print("[api] SERVER BOLLO: ");
@@ -613,11 +613,11 @@ static void handleServerFrame(uint64_t len) {
     gGotAudio = true;
     gPlayed += audioBytes;
     gTurnAudio += audioBytes;
-    // ⚠️ এখানে ছাপি না। প্রতি ফ্রেমে একটা লাইন মানে ২২৪টা লাইন,
-    //    ১১৫২০০ baud-এ প্রায় ০.৭ সেকেন্ড — ততক্ষণ I2S-এর DMA খালি
-    //    পড়ে থাকে আর শব্দ কেটে যায়।
+    // ⚠️ Avoid per-frame logging: 200+ lines at 115200 baud starves I2S DMA
+    //    and causes stuttering.
+    //
   }
-  if (textOut.length()) {                 // ফ্রেমের মাঝপথে কাটা পড়েছিল
+  if (textOut.length()) {                 // Flush any partial transcript snippet
     String &box = textIsInput ? gHeard : gSaid;
     if (box.length() < 300) box += textOut;
   }
@@ -631,7 +631,7 @@ static void pumpWs() {
     if (op == 0x1 || op == 0x2) {
       handleServerFrame(len);
     } else if (op == 0x8) {
-      // ── সার্ভার কেন লাইন কাটল, সেটা এখন আমরা পড়ি ──
+      // ── Parse closure status code and reason string ──
       uint16_t code = 0;
       char why[200];
       ws.readClose(len, code, why, sizeof(why));
@@ -666,11 +666,11 @@ static void pumpWs() {
   }
 }
 
-// ───────────────────── সেশন খোলা ─────────────────────
+// ───────────────────── Session Establishment ─────────────────────
 static bool openSession() {
   char path[400];
   snprintf(path, sizeof(path), "%s?key=%s", GEM_PATH, gApiKey);
-  // SDK key-টা হেডারে পাঠায়; আমরা URL-এও রাখছি, দুটোই একই key
+  // SDK sends API key in header; URL query parameter provided as fallback
   char hdr[200];
   snprintf(hdr, sizeof(hdr), "x-goog-api-key: %s", gApiKey);
   if (!ws.connect(GEM_HOST, 443, path, hdr)) return false;
@@ -688,7 +688,7 @@ static bool openSession() {
   return true;
 }
 
-// ───────────────────── বাটন ─────────────────────
+// ───────────────────── Button Initialization ─────────────────────
 static bool btnDown() { return digitalRead(BTN_PIN) == LOW; }
 
 // ───────────────────── setup ─────────────────────
@@ -713,7 +713,7 @@ void setup() {
   clockBegin();
 
   pinMode(BTN_PIN, INPUT_PULLUP);
-  pinMode(RESET_PIN, INPUT_PULLUP);      // বাটন না থাকলেও নিরাপদ (HIGH থাকবে)
+  pinMode(RESET_PIN, INPUT_PULLUP);      // Safe if unpopulated (floats HIGH)
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
@@ -723,7 +723,7 @@ void setup() {
   Serial.printf("[i2s] mic %s | amp %s\n", gMicOk ? "OK" : "BYARTHO",
                 gAmpOk ? "OK" : "BYARTHO");
 
-  // ── NVS থেকে API key ──
+  // ── Load API Key from NVS ──
   prefs.begin("mochidirect", true);
   String k = prefs.getString("key", "");
   gGain = prefs.getInt("gain", MIC_GAIN);
@@ -737,7 +737,7 @@ void setup() {
   strncpy(gApiKey, k.c_str(), sizeof(gApiKey) - 1);
   Serial.printf("[mic] gain %d (nije nije thik hoye jabe)\n", (int)gGain);
 
-  // ── WiFi + key (পোর্টাল) ──
+  // ── WiFi & API Key Configuration Portal ──
   WiFiManager wm;
   WiFiManagerParameter pKey("key", "Gemini API key", gApiKey,
                             sizeof(gApiKey) - 1);
@@ -755,13 +755,13 @@ void setup() {
   wm.setDarkMode(true);
   wm.setTitle("StudyMochi Direct");
 
-  // ── পোর্টাল কখন খুলবে ──
-  // ⚠️ ESP32-এর ভেতরে আগের স্কেচের WiFi পাসওয়ার্ড জমা থাকে, তাই
-  //    autoConnect() সোজা জুড়ে যায় আর পোর্টাল খোলেই না। তখন API key
-  //    দেওয়ার সুযোগই থাকে না। তাই **key না থাকলে জোর করে পোর্টাল**।
+  // ── Portal Trigger Conditions ──
+  // ⚠️ ESP32 preserves previous WiFi credentials in flash, which would cause
+  //    autoConnect() to bypass portal setup and prevent entering an API key.
+  //    Therefore, launch portal unconditionally if no API key is stored.
   bool needKey = strlen(gApiKey) < 10;
 
-  // বুটের পর বাটন চেপে ধরলেও পোর্টাল খুলবে (key বদলানোর জন্য)
+  // Also launches portal if reset button is held during boot
   bool force = false;
   uint32_t held = millis();
   while (btnDown()) { if (millis() - held > 1500) { force = true; break; } delay(20); }
@@ -791,7 +791,7 @@ void setup() {
 
   if (!ok) { Serial.println("[wifi] jukte parlam na - restart"); delay(2000); ESP.restart(); }
 
-  // ── পোর্টালে দেওয়া key জমা রাখি ──
+  // ── Save Configured Key to NVS ──
   if (strlen(pKey.getValue()) > 10) {
     strncpy(gApiKey, pKey.getValue(), sizeof(gApiKey) - 1);
     gApiKey[sizeof(gApiKey) - 1] = 0;
@@ -800,7 +800,7 @@ void setup() {
     prefs.end();
     Serial.println("[nvs] API key save holo");
   }
-  // আবহাওয়ার জায়গা — পোর্টালে দেওয়া থাকলে জমা রাখি
+  // Weather location — persist if updated in portal
   {
     float la = atof(pLat.getValue()), lo = atof(pLon.getValue());
     if (la >= -90 && la <= 90 && lo >= -180 && lo <= 180 &&
@@ -816,8 +816,8 @@ void setup() {
 
   Serial.print("[wifi] OK, IP "); Serial.println(WiFi.localIP());
 
-  // WiFi পাওয়া গেছে — ঘড়িটা NTP থেকে মিলিয়ে নিই (বাংলাদেশ UTC+6)।
-  // না পেলে কম্পাইলের সময়টা বসাই, যাতে ঘড়ি অন্তত চলে।
+  // WiFi connected — sync RTC from NTP (Bangladesh UTC+6).
+  // Fallback to compile timestamp if NTP is unreachable.
   if (clockOk()) {
     if (!clockSyncNTP(6 * 3600)) {
       MochiTime t = clockNow();
@@ -827,7 +827,7 @@ void setup() {
     Serial.printf("[rtc] ekhon %02d:%02d:%02d  %02d/%02d/%04d\n",
                   t.hour24, t.minute, t.second, t.day, t.month, t.year);
   }
-  weatherFetch(gLat, gLon);        // প্রথমবার এনে রাখি
+  weatherFetch(gLat, gLon);        // Initial weather fetch
   if (strlen(gApiKey) < 10) {
     Serial.println("\n[api] EKHONO API KEY NEI.");
     Serial.println("      Serial Monitor-e  p  likhe ENTER chapun");
@@ -849,22 +849,22 @@ void setup() {
 }
 
 // ───────────────────── loop ─────────────────────
-// ───── Serial Monitor-এর কমান্ড ─────
-//   p  → পোর্টাল খোলো (WiFi ও key বদলাও, পুরোনোটা রেখে)
-//   r  → সব মুছে ফেলো (WiFi + API key) আর নতুন করে শুরু
-//   i  → এখনকার অবস্থা দেখাও
-// WiFi ও API key দুটোই মুছে নতুন করে শুরু।
-// Serial-এর 'r' আর GPIO 4-এর বাটন — দুটোই এখানে আসে।
+// ───── Serial Monitor Commands ─────
+//   p  -> Launch portal (reconfigure WiFi & API key, preserving existing)
+//   r  -> Factory reset (wipe WiFi + API key and restart)
+//   i  -> Display current system status
+// Wipes both WiFi credentials and API key, restarting in setup mode.
+// Triggered by Serial 'r' command or 3-second GPIO 4 button hold.
 static void factoryReset(const char *why) {
   Serial.printf("\n[reset] %s — SOB MUCHE DICCHI (WiFi + API key)...\n", why);
   ws.stop();
   prefs.begin("mochidirect", false);
-  prefs.clear();                                 // API key মুছি
+  prefs.clear();                                 // Clear API key
   prefs.end();
   WiFiManager wm;
-  wm.resetSettings();                            // WiFi পাসওয়ার্ড মুছি
+  wm.resetSettings();                            // Clear saved WiFi credentials
   Serial.printf("[reset] muche gechhe. phone diye '%s' hotspot-e jurun\n", AP_NAME);
-  for (int i = 0; i < 6; i++) {                  // LED দিয়ে সংকেত
+  for (int i = 0; i < 6; i++) {                  // Signal visual confirmation via LED
     digitalWrite(LED_PIN, HIGH); delay(80);
     digitalWrite(LED_PIN, LOW);  delay(80);
   }
@@ -902,7 +902,7 @@ static void showHelp() {
 static void checkSerialCmd() {
   if (!Serial.available()) return;
 
-  // পুরো লাইনটা পড়ি — তাহলে  t <proshno>  আর  g 8  লেখা যায়
+  // Read full input line to support arguments: t <question> or g <gain>
   char line[96]; size_t n = 0;
   bool done = false;
   uint32_t t0 = millis();
@@ -1048,23 +1048,23 @@ static void checkSerialCmd() {
   }
 }
 
-// GPIO 4-এর বাটন ৩ সেকেন্ড চেপে ধরা হয়েছে কি — loop() থেকে ডাকা হয়
+// Checks if GPIO 4 reset button was held for 3 seconds — called from loop()
 static void checkResetButton() {
   static uint32_t downSince = 0;
   static uint32_t lastBlink = 0;
-  static bool     fired = false;      // একবার চললে বাটন না ছাড়া পর্যন্ত আর নয়
+  static bool     fired = false;      // Trigger once per press; require release before re-arming
 
-  if (digitalRead(RESET_PIN) != LOW) {            // ছাড়া আছে
-    if (downSince && !fired) {                    // মাঝপথে ছেড়ে দিল
+  if (digitalRead(RESET_PIN) != LOW) {            // Button released
+    if (downSince && !fired) {                    // Released before hold duration threshold
       Serial.println("[reset] batil kora holo");
       digitalWrite(LED_PIN, LOW);
     }
     downSince = 0;
-    fired = false;                                // এবার আবার চাপা যাবে
+    fired = false;                                // Re-arm for subsequent presses
     return;
   }
 
-  if (fired) return;                              // ধরে রেখেছে — বারবার নয়
+  if (fired) return;                              // Already fired — suppress repeat triggers
 
   uint32_t now = millis();
   if (!downSince) {
@@ -1076,7 +1076,7 @@ static void checkResetButton() {
 
   uint32_t held = now - downSince;
 
-  // যত সময় যায় LED তত দ্রুত জ্বলে — কতটা এগিয়েছে বোঝা যায়
+  // LED blink rate accelerates to indicate hold progress
   uint32_t period = held > 2000 ? 80 : (held > 1000 ? 160 : 300);
   if (now - lastBlink > period) {
     lastBlink = now;
@@ -1084,20 +1084,20 @@ static void checkResetButton() {
   }
 
   if (held >= RESET_HOLD_MS) {
-    fired = true;                                 // চেপে ধরে থাকলেও আর নয়
+    fired = true;                                 // Mark fired to prevent re-triggering while held
     factoryReset("GPIO 4 botam");
   }
 }
 
-// পরের চেষ্টা কখন — আর কেন, সেটা পরিষ্কার করে বলে দিই
+// Schedules next reconnect attempt and logs reason clearly
 static void planRetry(const char *why, uint32_t ms) {
-  if (ms < 15000)  ms = 15000;         // ১৫ সেকেন্ডের কমে কখনো নয়
-  if (ms > 300000) ms = 300000;        // ৫ মিনিটের বেশিও নয়
+  if (ms < 15000)  ms = 15000;         // Minimum retry window: 15 seconds
+  if (ms > 300000) ms = 300000;        // Maximum retry window: 5 minutes
   gBackoff = ms;
   gNextTry = millis() + ms;
   gLastWaitMsg = 0;
   faceSetState(FACE_WAITING);
-  faceSetWait((int)(ms / 1000));   // "৩০০ সেকেন্ড পর" — উপরে
+  faceSetWait((int)(ms / 1000));   // Format countdown on display
   Serial.printf("[ws] %s — %u second por abar cheshta korbo\n",
                 why, (unsigned)(ms / 1000));
 }
@@ -1108,7 +1108,7 @@ static void saveGain() {
   prefs.end();
 }
 
-// এক চাঁক অডিও পাঠাই। না গেলে লাইনটা আর বিশ্বাস করি না।
+// Transmits an audio chunk. Disconnects if transmission fails.
 static bool pushChunk() {
   if (!pcmFill) return true;
   size_t n = pcmFill;
@@ -1123,9 +1123,9 @@ static bool pushChunk() {
   return true;
 }
 
-// ───────────────────── টাচ, পর্দা, পমোডোরো ─────────────────────
-// মোচিকে কিছু বলাতে চাই (পমোডোরো শেষ হলো ইত্যাদি) — কিন্তু সে
-// যখন ফাঁকা আছে তখনই, নইলে চলতি উত্তরের মাঝখানে ঢুকে পড়বে।
+// ───────────────────── Touch, Display & Pomodoro ─────────────────────
+// Queues spoken announcement (e.g. pomodoro completion) to play
+// only once Mochi returns to IDLE state to prevent interrupting speech.
 static void askMochi(const char *what) {
   strncpy(gSpeakWhat, what, sizeof(gSpeakWhat) - 1);
   gSpeakWhat[sizeof(gSpeakWhat) - 1] = 0;
@@ -1156,18 +1156,18 @@ static void pomoTick(uint32_t now) {
       Serial.printf("[pomo] %d nombor round shesh\n", gPomoRounds);
       askMochi("Amar 25 minute porar somoy shesh holo. "
                "Choto kore obhinondon jano ar 5 minute bishram nite bolo.");
-      pomoStart(true);                       // সাথে সাথে বিরতি
+      pomoStart(true);                       // Immediately start break phase
     } else {
       Serial.println("[pomo] biroti shesh");
       askMochi("Bishram shesh. Amake abar porte bosar janno ek line-e utsaho dao.");
-      gPomoLeft = POMO_WORK_SEC;             // পরের রাউন্ড হাতে শুরু হবে
+      gPomoLeft = POMO_WORK_SEC;             // Next work round starts manually
     }
   }
   facePomoData(gPomoLeft, gPomoRun, gPomoBreak, gPomoRounds);
   if (faceScreen() == SCR_POMO) faceRedraw();
 }
 
-// ───────────────────── টাইমার ─────────────────────
+// ───────────────────── Custom Timer ─────────────────────
 static void tmrPush() {
   faceTimerData(gTmrLeft, gTmrTotal, gTmrSetMin, gTmrMode, gTmrBlinkOn);
   if (faceScreen() == SCR_TIMER && faceGetState() == FACE_IDLE) faceRedraw();
@@ -1195,16 +1195,16 @@ static void tmrClear() {
 }
 
 static void tmrTick(uint32_t now) {
-  // ── বাকি বিপগুলো ──
-  // beep() নিজে ব্লক করে, তাই একসাথে তিনটে বাজাই না — একটা করে,
-  // ৪৫০ ms পর পর। মাঝখানে loop() চলতে থাকে।
+  // ── Alert Beeps ──
+  // beep() is blocking, so play single beeps spaced 450 ms apart
+  // allowing the main loop() to continue running smoothly.
   if (gTmrBeeps > 0 && (int32_t)(now - gTmrBeepAt) >= 0) {
     beep(880, 220, 9000);
     gTmrBeeps--;
     gTmrBeepAt = now + 450;
   }
 
-  // ── শেষ হয়ে গেলে পর্দা জ্বলে-নেভে ──
+  // ── Flash screen alert when completed ──
   if (gTmrMode == TM_DONE) {
     if (now - gTmrBlink >= 500) {
       gTmrBlink = now;
@@ -1214,9 +1214,9 @@ static void tmrTick(uint32_t now) {
     return;
   }
 
-  // ── বসানোর ভঙ্গিতে চুপ থাকলে নিজে থেকেই চালু ──
-  // বোতাম একটাই, তাই "শুরু করো" বলার আলাদা উপায় নেই। সংখ্যাটা
-  // পছন্দ হলে আঙুল সরিয়ে নিলেই তিন সেকেন্ড পর গোনা শুরু।
+  // ── Auto-start countdown after setting idle timeout ──
+  // With a single button interface, releasing for 3 seconds
+  // automatically commits the configured minutes and starts the countdown.
   if (gTmrMode == TM_SET) {
     if (gTmrSetMin > 0 && now - gTmrTick >= TMR_SET_WAIT_MS) tmrStart(gTmrSetMin);
     return;
@@ -1229,8 +1229,8 @@ static void tmrTick(uint32_t now) {
 
   if (gTmrLeft == 0) {
     gTmrMode    = TM_DONE;
-    gTmrBeeps   = 3;                      // শুধু বিপ — কোনো কথা নয়,
-    gTmrBeepAt  = now;                    // তাই নেট বা কোটা লাগে না
+    gTmrBeeps   = 3;                      // 3 alert beeps (no network/quota required)
+    gTmrBeepAt  = now;                    //
     gTmrBlink   = now;
     gTmrBlinkOn = true;
     Serial.printf("[timer] somoy shesh (%d minute)\n", gTmrTotal / 60);
@@ -1238,7 +1238,7 @@ static void tmrTick(uint32_t now) {
   tmrPush();
 }
 
-// টাইমারের পর্দায় এক চাপ — সব কাজ এই একটা ছোঁয়াতেই
+// Single tap on Timer screen — manages all timer states
 static void tmrTap(uint32_t now) {
   switch (gTmrMode) {
     case TM_IDLE:
@@ -1249,7 +1249,7 @@ static void tmrTap(uint32_t now) {
       break;
 
     case TM_SET:
-      // ৫ → ১০ → … → ৬০ → ০ (০ মানে বাদ)
+      // 5 -> 10 -> ... -> 60 -> 0 (0 cancels timer)
       gTmrSetMin += TMR_STEP_MIN;
       if (gTmrSetMin > TMR_MAX_MIN) gTmrSetMin = 0;
       gTmrTick = now;
@@ -1274,7 +1274,7 @@ static void tmrTap(uint32_t now) {
       break;
 
     case TM_DONE:
-      gTmrBeeps = 0;                      // বিপ থামাই
+      gTmrBeeps = 0;                      // Silence beeps
       tmrClear();
       Serial.println("[timer] muchhe dilam");
       return;
@@ -1282,11 +1282,11 @@ static void tmrTap(uint32_t now) {
   tmrPush();
 }
 
-// ⭐ টাচ ২ — উল্টো করা হয়েছে (আপনার কথায়):
-//    চেপে ধরলে পর্দা বদলায়, এক চাপে সেই পর্দার কাজ হয়।
-//    আগে উল্টোটা ছিল, তাতে কাজ করতে গিয়ে পর্দা বদলে যেত।
+// ⭐ Touch-2 gesture mapping:
+//    Long press switches screen; single tap triggers screen action.
+//    (Prevents accidental screen switches during interaction).
 static void handleMenuTouch(uint32_t now) {
-  // ── চেপে ধরা → পরের পর্দা ──
+  // ── Long Press -> Cycle to Next Screen ──
   if (tMenu.tookHold()) {
     faceNextScreen();
     FaceScreen sc = faceScreen();
@@ -1295,7 +1295,7 @@ static void handleMenuTouch(uint32_t now) {
                   sc == SCR_WEATHER ? "abohawa" :
                   sc == SCR_POMO ? "pomodoro" : "timer");
     if (sc == SCR_WEATHER) {
-      // পর্দায় এলেই টাটকা খবর আনি (১৫ মিনিটের মধ্যে হলে ক্যাশ থেকেই)
+      // Refresh weather upon entering screen (serves from cache if < 15 min old)
       if (weatherFetch(gLat, gLon)) {
         WeatherNow w = weatherGet();
         faceWeatherData(true, w.tempC, w.humidity, w.code, w.windKmh);
@@ -1303,10 +1303,10 @@ static void handleMenuTouch(uint32_t now) {
     }
     if (sc == SCR_TIMER) tmrPush();
     faceRedraw();
-    return;                               // এক ছোঁয়ায় একটাই কাজ
+    return;                               // Execute single action per gesture
   }
 
-  // ── এক চাপ → এই পর্দার কাজ ──
+  // ── Single Tap -> Screen Specific Action ──
   if (!tMenu.tookTap()) return;
 
   switch (faceScreen()) {
@@ -1326,7 +1326,7 @@ static void handleMenuTouch(uint32_t now) {
       break;
 
     case SCR_WEATHER:
-      // আবার খবর আনি — ক্যাশ ফেলে দিয়ে
+      // Force fresh weather fetch bypassing cache
       Serial.println("[wx] notun kore anchhi");
       if (weatherFetch(gLat, gLon, true)) {
         WeatherNow w = weatherGet();
@@ -1335,15 +1335,15 @@ static void handleMenuTouch(uint32_t now) {
       faceRedraw();
       break;
 
-    default:                              // মুখ, ঘড়ি — কিছু করার নেই
+    default:                              // Face, Clock screens have no tap action
       break;
   }
 }
 
-// ঘড়ির পর্দা থাকলে সেকেন্ডে একবার নতুন করে আঁকি
+// Redraw clock screen once per second
 static void clockTick(uint32_t now) {
   if (faceScreen() != SCR_CLOCK) return;
-  if (faceGetState() != FACE_IDLE) return;      // মোচি কাজে থাকলে নয়
+  if (faceGetState() != FACE_IDLE) return;      // Suppress if Mochi is actively interacting
   if (now - gClockTick < 1000) return;
   gClockTick = now;
   MochiTime t = clockNow();
@@ -1366,18 +1366,18 @@ void loop() {
   faceTick();                      // chokher polok, bhabnar bindu
   if (strlen(gApiKey) < 10) { delay(1000); return; }
 
-  // সংযোগ কেটে গেলে আবার খুলি — কিন্তু ধীরে সুস্থে
+  // Reconnect dropped WebSocket session using exponential backoff
   if (!ws.connected()) {
     gTalking = false; pcmFill = 0; digitalWrite(LED_PIN, LOW);
 
     int32_t left = (int32_t)(gNextTry - millis());
-    if (left > 0) {                       // এখনো সময় হয়নি
+    if (left > 0) {                       // Backoff delay has not elapsed yet
       if (millis() - gLastWaitMsg > 30000) {
         gLastWaitMsg = millis();
         Serial.printf("[ws] opekkha... aro %d second\n", left / 1000);
       }
       delay(50);
-      return;                             // বাটন/serial তবু চলবে
+      return;                             // Non-blocking: loop() handles button & Serial
     }
 
     Serial.println("[ws] session khulchi...");
@@ -1386,24 +1386,24 @@ void loop() {
       planRetry("khola gelo na", gBackoff ? gBackoff * 2 : 15000);
       return;
     }
-    gBackoff = 0;                         // সফল — গোনা শুরু থেকে
+    gBackoff = 0;                         // Reset backoff upon successful connection
     Serial.println(">>> BOOT BOTAM CHEPE DHORE KOTHA BOLUN <<<");
   }
 
   pumpWs();
-  if (!ws.connected()) return;          // pumpWs লাইন কেটে দিয়ে থাকতে পারে
+  if (!ws.connected()) return;          // Connection may have been severed by pumpWs
 
-  // উত্তরের অপেক্ষা বেশি লম্বা হলে জানিয়ে দিই
-  // ⚠️ ৩০ সেকেন্ড, ১৫ নয় — protocheck-এ দেখা গেল মডেল ভেবেচিন্তে
-  //    উত্তর দিতে ২০ সেকেন্ডও নিতে পারে। আগে সেই স্বাভাবিক দেরিতেই
-  //    "উত্তর এল না" লেখা ভেসে উঠত, অথচ উত্তর আসছিল।
+  // Check for response latency timeout
+  // ⚠️ 30 seconds timeout: Complex queries can take 15-20s for Gemini Live
+  //    to synthesize. Avoid false timeouts during legitimate processing.
+  //
   if (gWaitSince && millis() - gWaitSince > 30000) {
     gWaitSince = 0;
     Serial.println("[api] 30s dhore kono uttor elo na.");
     Serial.println("      mic peak dekhun — 500-er niche hole mic-e sound jacche na.");
   }
 
-  // পমোডোরোর বার্তা জমে থাকলে, মোচি ফাঁকা হলেই বলে দিই
+  // Play queued Pomodoro announcement once Mochi is idle
   if (gSpeakOnIdle && gReady && !gTalking && !gWaitSince) {
     gSpeakOnIdle = false;
     gGotAudio = false;
@@ -1413,7 +1413,7 @@ void loop() {
 
   bool down = btnDown() || tTalk.isDown();
 
-  // ── বাটন চাপা হলো ──
+  // ── Talk Button Pressed ──
   if (down && !gTalking && gReady) {
     gTalking = true;
     digitalWrite(LED_PIN, HIGH);
@@ -1422,24 +1422,24 @@ void loop() {
     gSumSq = 0; gNSamp = 0;
     gTurnAudio = 0; gHeard = ""; gSaid = "";
     gGainStart = gGain;
-    // ⚠️ হাই-পাস ফিল্টার এখানে রিসেট করি না, আর RX DMA-ও খালি করি না।
-    //    যে ফার্মওয়্যারটা ল্যাপটপের সাথে ঠিকঠাক চলছে সেটাও করে না —
-    //    বুটে একবার সেট হয়ে চলতেই থাকে। রিসেট করলে টার্নের প্রথম
-    //    স্যাম্পলটা DC ধাক্কা খেয়ে আকাশে উঠে যায় (peak 32768-এর কারণ)।
+    // ⚠️ Do not reset high-pass filter or purge RX DMA here.
+    //    Preserves continuous DC bias tracking across speech turns.
+    //    Resetting injects a transient DC spike that can cause initial clipping.
+    //
     if (!sendActivity(true)) { gTalking = false; digitalWrite(LED_PIN, LOW); return; }
     faceSetState(FACE_LISTENING);
     faceSetMsg(MSG_SHUNCHHI);
     Serial.println("[rec] shuru");
   }
 
-  // ── চেপে রাখা আছে → অডিও পাঠাই ──
+  // ── Talk Button Held -> Stream Audio ──
   if (gTalking) {
     size_t got = 0;
     bool lineOk = true;
     if (i2s_read(I2S_MIC, rawBuf, sizeof(rawBuf), &got, I2S_WAIT) == ESP_OK) {
       size_t n = got / sizeof(int32_t);
-      // ⚠️ এক ফোঁটাও ফেলা যাবে না। বাফার ভরে গেলে সাথে সাথে পাঠিয়ে
-      //    খালি করি, তারপর এই পড়াটার বাকি স্যাম্পলগুলো ঢুকতে থাকে।
+      // ⚠️ Zero sample loss: Flush filled chunks immediately and continue buffering
+      //    remaining samples seamlessly.
       for (size_t i = 0; i < n && lineOk; i++) {
         pcmBuf[pcmFill++] = micSample(rawBuf[i]);
         if (pcmFill >= CHUNK_SAMPLES) lineOk = pushChunk();
@@ -1451,7 +1451,7 @@ void loop() {
     if (!lineOk) { gTalking = false; digitalWrite(LED_PIN, LOW); return; }
 
     if (!down) {
-      pushChunk();                       // শেষ টুকরোটাও যাক
+      pushChunk();                       // Transmit final partial chunk
       sendActivity(false);
       gTalking = false;
       gWaitSince = millis();
@@ -1459,10 +1459,10 @@ void loop() {
       faceSetState(FACE_THINKING);
       faceSetMsg(MSG_BHABCHHI);
 
-      // ── গড় আওয়াজ দেখে পরের বারের গেইন ঠিক করি ──
-      // peak নয়, rms-ই আসল মাপ: কথার জন্য −২০ dBFS-এর কাছাকাছি
-      // থাকলে Gemini সবচেয়ে ভালো বোঝে। একবারে ৪ গুণের বেশি
-      // বদলাই না, নইলে দোল খেতে থাকবে।
+      // ── Automatic Gain Control: Adjust gain for next turn based on RMS ──
+      // Target RMS near -20 dBFS for optimal speech recognition.
+      // Step size limited to prevent oscillating gain feedback.
+      //
       int32_t rms = turnRms();
       if (rms > 150) {
         int64_t ng = ((int64_t)gGain * AIM_RMS) / rms;

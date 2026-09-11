@@ -7,8 +7,8 @@ static RTC_DS3231 rtc;
 static bool gOk = false;
 
 bool clockBegin() {
-  // Wire.begin() face.cpp-তে আগেই হয়ে গেছে — এখানে আর করি না,
-  // নইলে OLED-এর সেটিং (400 kHz) নষ্ট হতে পারে।
+  // Wire.begin() is already called in face.cpp — do not call it again here,
+  // otherwise OLED frequency settings (400 kHz) could be overwritten.
   gOk = rtc.begin(&Wire);
   if (!gOk) {
     Serial.println("[rtc] DS3231 pai ni (0x68). tar dekhun: SDA 21, SCL 22");
@@ -29,7 +29,7 @@ MochiTime clockNow() {
   t.hour24 = n.hour(); t.minute = n.minute(); t.second = n.second();
   t.day = n.day(); t.month = n.month(); t.year = n.year();
   t.dow = n.dayOfTheWeek();
-  t.valid = n.year() >= 2024;      // ২০২৪-এর আগে হলে সময় বসানোই হয়নি
+  t.valid = n.year() >= 2024;      // If year is before 2024, time was never initialized
   return t;
 }
 
@@ -45,7 +45,7 @@ bool clockSyncNTP(long gmtOffsetSec) {
   configTime(gmtOffsetSec, 0, "pool.ntp.org", "time.google.com");
 
   struct tm tmNow;
-  // ~৮ সেকেন্ড অপেক্ষা করি; না পেলে হাল ছেড়ে দিই
+  // Wait ~8 seconds; abort if NTP is unreachable
   for (int i = 0; i < 16; i++) {
     if (getLocalTime(&tmNow, 500)) {
       DateTime net(tmNow.tm_year + 1900, tmNow.tm_mon + 1, tmNow.tm_mday,
@@ -66,7 +66,7 @@ bool clockSyncNTP(long gmtOffsetSec) {
   return false;
 }
 
-// ───────────────────── বাংলা লেখা ─────────────────────
+// ───────────────────── Bengali Text Helpers ─────────────────────
 static const char *BN_DIGIT[10] = {
   "০", "১", "২", "৩", "৪", "৫", "৬", "৭", "৮", "৯"
 };

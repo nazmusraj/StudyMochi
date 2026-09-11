@@ -6,21 +6,21 @@
 static WeatherNow gW;
 
 #define WX_HOST  "api.open-meteo.com"
-#define WX_FRESH_MS (15UL * 60UL * 1000UL)      // ১৫ মিনিট
+#define WX_FRESH_MS (15UL * 60UL * 1000UL)      // 15 minutes
 
-// ⚠️ open-meteo একই নামগুলো **দুবার** পাঠায়:
-//     "current_units":{"temperature_2m":"°C", ...}      ← একক, লেখা
-//     "current":{"temperature_2m":31.4, ...}            ← আসল সংখ্যা
-// প্রথমে যেটা পাই সেটা নিলে "°C"-তে গিয়ে ঠেকি আর কিছুই পাই না।
-// তাই আগে "current":{ খুঁজে নিই, তারপর সেখান থেকে পড়ি।
-// (আসল উত্তর দিয়ে টেস্ট করেই এটা ধরা পড়েছিল।)
+// ⚠️ Open-Meteo sends identical key names twice:
+//     "current_units":{"temperature_2m":"°C", ...}      ← Unit strings
+//     "current":{"temperature_2m":31.4, ...}            ← Actual numeric values
+// If we match the first occurrence, we hit "°C" instead of numeric data.
+// Therefore, we seek "current":{ first and parse from that block.
+// (Discovered and validated by testing against live responses.)
 static String currentBlock(const String &body) {
   int i = body.indexOf("\"current\":{");
   return i < 0 ? body : body.substring(i);
 }
 
-// JSON থেকে একটা সংখ্যা তুলে আনি। উত্তরটা ছোট আর গঠন সরল,
-// তাই পুরো JSON পার্সার (ArduinoJson) টানার দরকার নেই।
+// Extracts a numeric float value following a key from JSON.
+// The response structure is simple enough that a full JSON parser (ArduinoJson) is unnecessary.
 static bool numAfter(const String &s, const char *key, float &out) {
   int i = s.indexOf(key);
   if (i < 0) return false;
@@ -36,14 +36,14 @@ static bool numAfter(const String &s, const char *key, float &out) {
 
 bool weatherFetch(float lat, float lon, bool force) {
   if (!force && gW.valid && (millis() - gW.fetchedAt) < WX_FRESH_MS)
-    return true;                                  // এখনো টাটকা
+    return true;                                  // Data is still fresh
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[wx] WiFi nei");
     return false;
   }
 
   WiFiClientSecure c;
-  c.setInsecure();                                // ঘরোয়া ব্যবহারে যথেষ্ট
+  c.setInsecure();                                // Sufficient for home IoT usage
   c.setTimeout(10);
   if (!c.connect(WX_HOST, 443)) {
     Serial.println("[wx] connect holo na");
@@ -60,7 +60,7 @@ bool weatherFetch(float lat, float lon, bool force) {
   c.printf("Host: %s\r\n", WX_HOST);
   c.print("Connection: close\r\n\r\n");
 
-  // হেডার পেরিয়ে যাই
+  // Skip HTTP headers
   uint32_t t0 = millis();
   String line, body;
   bool inBody = false;
@@ -111,7 +111,7 @@ bool weatherFetch(float lat, float lon, bool force) {
 
 WeatherNow weatherGet() { return gW; }
 
-// WMO আবহাওয়া কোড — https://open-meteo.com/en/docs
+// WMO weather interpretation codes — https://open-meteo.com/en/docs
 const char *weatherBangla(int code) {
   switch (code) {
     case 0:  return "পরিষ্কার আকাশ";
@@ -138,8 +138,8 @@ const char *weatherBangla(int code) {
 
 String weatherSentence(const WeatherNow &w) {
   if (!w.valid) return "Abohawa-r khobor ekhono ani ni.";
-  // মোচি যেহেতু বাংলা বলে, তাকে রোমান হরফে নির্দেশ দিই —
-  // Live API রোমান বাংলা ভালোই বোঝে আর বাংলায় বলে।
+  // Since Mochi speaks Bengali, provide the prompt instruction in Romanized Bengali —
+  // Gemini Live API understands Romanized Bengali prompts reliably and responds in Bengali.
   char s[220];
   snprintf(s, sizeof(s),
            "Ekhon baire %.0f degree, %s. Battash %.0f km/h, "

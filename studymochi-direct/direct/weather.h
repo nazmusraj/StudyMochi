@@ -1,15 +1,15 @@
 // ════════════════════════════════════════════════════════════════
-//   আবহাওয়া — Open-Meteo থেকে।
+//   Weather Client — Using Open-Meteo.
 //
-//   কেন Open-Meteo: **API key লাগে না**, ফ্রি, আর ব্যক্তিগত
-//   ব্যবহারে কোনো সীমা নেই। OpenWeatherMap-এর মতো আলাদা অ্যাকাউন্ট
-//   খুলে key জোগাড় করার ঝামেলা নেই — একটা HTTPS GET-ই যথেষ্ট।
+//   Why Open-Meteo: Requires NO API key, is free, and has generous
+//   limits for personal projects. Unlike services such as OpenWeatherMap,
+//   there is no need to register or manage keys — a single HTTPS GET suffices.
 //
-//   ডিফল্ট জায়গা ঢাকা (২৩.৮১, ৯০.৪১)। পোর্টাল থেকে বদলানো যায়।
+//   Default location: Dhaka (23.81, 90.41). Configurable via portal.
 //
-//   বাড়তি কোনো লাইব্রেরি লাগে না — WiFiClientSecure দিয়েই GET,
-//   আর উত্তরটা ছোট বলে হাতে লেখা পার্সারই যথেষ্ট (ArduinoJson
-//   ইনস্টল করার দরকার নেই)।
+//   No external dependencies: Uses WiFiClientSecure directly for GET,
+//   and parses the compact response with a lightweight parser
+//   (no need for ArduinoJson).
 // ════════════════════════════════════════════════════════════════
 #pragma once
 #include <Arduino.h>
@@ -23,14 +23,14 @@ struct WeatherNow {
   uint32_t fetchedAt = 0;      // millis()
 };
 
-// নেট থেকে টেনে আনে। ১৫ মিনিটের মধ্যে আগে আনা থাকলে সেটাই দেয়
-// (force = true দিলে জোর করে আবার আনে)।
+// Fetches weather data from network. Returns cached data if fetched
+// within the last 15 minutes (set force = true to force a fresh request).
 bool weatherFetch(float lat, float lon, bool force = false);
 
 WeatherNow weatherGet();
 
-// WMO কোডকে বাংলা কথায় বদলায় — "ঝিরঝিরে বৃষ্টি" ইত্যাদি
+// Maps WMO numeric weather code to Bengali description (e.g. "Drizzle")
 const char *weatherBangla(int code);
 
-// মোচি মুখে যা বলবে, সেই বাক্যটা বানায়
+// Generates the spoken weather prompt sentence for Mochi
 String weatherSentence(const WeatherNow &w);

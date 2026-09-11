@@ -5,8 +5,8 @@
 #include <esp_random.h>
 
 
-// ───────────────────────── ছবির বাফার ─────────────────────────
-// SSD1306 ১২৮×৬৪ = ৮ পেজ × ১২৮ কলাম। এক বাইট = এক কলামের ৮ পিক্সেল।
+// ───────────────────────── Framebuffer ─────────────────────────
+// SSD1306 128x64 = 8 pages x 128 columns. One byte = 8 vertical pixels per column.
 #define W 128
 #define H 64
 #define PAGES (H / 8)
@@ -16,31 +16,31 @@ static bool      gOk   = false;
 static uint8_t   gAddr = 0x3C;
 static FaceState gState = FACE_BOOT;
 
-// ⚠️ SSD1306 না SH1106 — এটাই সবচেয়ে বড় ফাঁদ।
-// বাজারের অনেক "SSD1306" আসলে SH1106 (বিশেষত ১.৩ ইঞ্চি)। SH1106
-// 0x21/0x22 (horizontal addressing) কমান্ড চেনে না, তাই পুরো ছবিটা
-// একটামাত্র পেজে গিয়ে পড়ে আর বাকি পর্দায় আবর্জনা থেকে যায়।
+// ⚠️ SSD1306 vs SH1106 — the most common display pitfall.
+// Many commercial "SSD1306" modules are actually SH1106 (especially 1.3" displays). SH1106
+// does not recognize 0x21/0x22 (horizontal addressing) commands, causing the entire image
+// to compress into a single page with visual artifacts elsewhere on screen.
 //
-// সমাধান: **page addressing** — এটা দুটো কন্ট্রোলারেই চলে।
-// তফাত থাকে মোটে দুটো: কলামের অফসেট (SH1106-এর RAM ১৩২ চওড়া,
-// দেখা যায় ২..১২৯) আর চার্জ পাম্পের কমান্ড।
-static bool    gSH1106  = true;      // o কমান্ড দিয়ে বদলানো যায়
+// Solution: **page addressing** — supported identically on both controllers.
+// Only two minor differences remain: column offset (SH1106 RAM is 132 wide,
+// visible columns are 2..129) and charge pump command sequences.
+static bool    gSH1106  = true;      // Can be toggled with 'o' command
 static uint8_t gColOff  = 2;
 
-// ঠোঁটের জানালা — শুধু এটুকুই বারবার পাঠাই
+// Mouth window — transmitted repeatedly during speech animation
 #define MOUTH_X0 40
 #define MOUTH_X1 88
 #define MOUTH_P0 5            // y 40..55
 #define MOUTH_P1 6
 
-// লেভেল বারের জানালা (শোনার সময়)
+// Audio level bar window (during speech recording)
 #define BAR_X0 14
 #define BAR_X1 114
 #define BAR_P0 6
 #define BAR_P1 6
 
-// ───────────────────────── ৫×৭ ফন্ট ─────────────────────────
-// ASCII 32..126, প্রতি অক্ষরে ৫ বাইট (এক বাইট = এক কলাম)
+// ───────────────────────── 5x7 Font ─────────────────────────
+// ASCII 32..126, 5 bytes per character (one byte = one column)
 static const uint8_t FONT[] PROGMEM = {
   0x00,0x00,0x00,0x00,0x00, 0x00,0x00,0x5F,0x00,0x00, 0x00,0x07,0x00,0x07,0x00,
   0x14,0x7F,0x14,0x7F,0x14, 0x24,0x2A,0x7F,0x2A,0x12, 0x23,0x13,0x08,0x64,0x62,
@@ -76,7 +76,7 @@ static const uint8_t FONT[] PROGMEM = {
   0x00,0x41,0x36,0x08,0x00, 0x02,0x01,0x02,0x04,0x02,
 };
 
-// ───────────────────── পর্দার তথ্য ─────────────────────
+// ───────────────────── Screen Data ─────────────────────
 static FaceScreen gScreen = SCR_FACE;
 
 static struct { int h24, mi, se, day, mon, year, dow; bool ok; } gClk =
@@ -95,9 +95,9 @@ static void cmd(uint8_t c) {
   Wire.endTransmission();
 }
 
-// একটা আয়তক্ষেত্র পাঠাই — এটাই আসল কৌশল, পুরো পর্দা নয়।
-// প্রতি পেজে আলাদা করে page+column বসাই (0xB0 / 0x00 / 0x10) —
-// এই তিনটে কমান্ড SSD1306 আর SH1106 **দুটোতেই** এক রকম কাজ করে।
+// Transmits a bounding box window — avoids pushing the entire 1024-byte framebuffer.
+// Sets page and column addresses individually per page (0xB0 / 0x00 / 0x10) —
+// these three commands behave identically on both SSD1306 and SH1106 controllers.
 static void pushWindow(uint8_t x0, uint8_t x1, uint8_t p0, uint8_t p1) {
   if (!gOk) return;
   if (x1 >= W) x1 = W - 1;
@@ -107,15 +107,15 @@ static void pushWindow(uint8_t x0, uint8_t x1, uint8_t p0, uint8_t p1) {
     uint8_t col = x0 + gColOff;
     Wire.beginTransmission(gAddr);
     Wire.write((uint8_t)0x00);
-    Wire.write(0xB0 | p);                 // কোন পেজ
-    Wire.write(0x00 | (col & 0x0F));      // কলামের নিচের চার বিট
-    Wire.write(0x10 | (col >> 4));        // উপরের চার বিট
+    Wire.write(0xB0 | p);                 // Target page
+    Wire.write(0x00 | (col & 0x0F));      // Lower 4 bits of column address
+    Wire.write(0x10 | (col >> 4));        // Upper 4 bits of column address
     Wire.endTransmission();
 
     const uint8_t *src = fb + p * W + x0;
     uint16_t n = x1 - x0 + 1;
     while (n) {
-      uint16_t k = n > 16 ? 16 : n;                   // I2C বাফারে আঁটে
+      uint16_t k = n > 16 ? 16 : n;                   // Fits within I2C buffer limit
       Wire.beginTransmission(gAddr);
       Wire.write((uint8_t)0x40);
       Wire.write(src, k);
@@ -127,7 +127,7 @@ static void pushWindow(uint8_t x0, uint8_t x1, uint8_t p0, uint8_t p1) {
 
 static void pushAll() { pushWindow(0, W - 1, 0, PAGES - 1); }
 
-// ───────────────────────── আঁকার সরঞ্জাম ─────────────────────────
+// ───────────────────────── Drawing Primitives ─────────────────────────
 static inline void px(int x, int y, bool on) {
   if (x < 0 || x >= W || y < 0 || y >= H) return;
   uint8_t *b = &fb[(y >> 3) * W + x];
@@ -151,7 +151,7 @@ static void fillCircle(int cx, int cy, int r, bool on = true) {
       if (x * x + y * y <= r * r) px(cx + x, cy + y, on);
 }
 
-// ভরা উপবৃত্ত — ঠোঁটের জন্য
+// Filled ellipse — used for mouth rendering
 static void fillEllipse(int cx, int cy, int rx, int ry, bool on = true) {
   if (rx < 1) rx = 1;
   if (ry < 1) ry = 1;
@@ -182,7 +182,7 @@ static void drawTextCentered(int y, const char *s) {
   drawText(x, y, s);
 }
 
-// ───────────────── বিটম্যাপ (Adafruit-এর ধরন) ─────────────────
+// ───────────────── Bitmaps (Adafruit GFX Format) ─────────────────
 static void drawBmp(int x, int y, const uint8_t *bmp, int w, int h) {
   int bpr = (w + 7) / 8;
   for (int j = 0; j < h; j++)
@@ -192,7 +192,7 @@ static void drawBmp(int x, int y, const uint8_t *bmp, int w, int h) {
     }
 }
 
-// বারের নাম — U8g2 নয়, আগেই বানানো ছবি (যুক্তাক্ষর ভাঙে না)
+// Day names — pre-rendered bitmaps rather than U8g2 (prevents broken conjuncts)
 static void drawDayName(int y, int dow) {
   dow = (dow % 7 + 7) % 7;
   int w = BN_DAY_W[dow];
@@ -200,15 +200,15 @@ static void drawDayName(int y, int dow) {
   drawBmp((W - w) / 2, y, bmp, w, BN_DAY_H);
 }
 
-// ছোট বাংলা সংখ্যা। ইনপুট সাধারণ ASCII ("07/09/2026") — ০-৯
-// বিটম্যাপ থেকে আসে, বাকি চিহ্ন (: / %) ছোট রোমান ফন্ট থেকে।
+// Small Bengali numerals. Input is ASCII ("07/09/2026") — digits 0-9
+// render from Bengali bitmaps, while symbols (: / %) use the 5x7 font.
 static int bnNumWidth(const char *s) {
   int w = 0;
   for (; *s; s++) w += (*s >= '0' && *s <= '9') ? BN_NUM_W[*s - '0'] + 2 : 6;
   return w > 0 ? w - 1 : 0;
 }
 
-static void bnNum(int x, int y, const char *s) {          // y = উপরের কিনারা
+static void bnNum(int x, int y, const char *s) {          // y = top edge
   for (; *s; s++) {
     if (*s >= '0' && *s <= '9') {
       int d = *s - '0';
@@ -227,7 +227,7 @@ static void bnNumCentered(int y, const char *s) {
   bnNum(x, y, s);
 }
 
-// বড় বাংলা সংখ্যা — ঘড়ির মূল সময় আর পমোডোরোর কাউন্টডাউন
+// Large Bengali numerals — primary clock time and pomodoro countdown
 static int bnBigWidth(const char *s) {
   int w = 0;
   for (; *s; s++) {
@@ -256,7 +256,7 @@ static void bnBigCentered(int y, const char *s) {
   bnBig(x, y, s);
 }
 
-// আবহাওয়ার কথাটা — WMO কোড থেকে কোন ছবি
+// Weather condition bitmap mapped from WMO code
 static int wxLabel(int code) {
   switch (code) {
     case 0:  return 0;   case 1:  return 1;   case 2:  return 2;
@@ -282,18 +282,18 @@ static void drawWxLabel(int y, int code) {
 }
 
 // ════════════════════════════════════════════════════════════════
-//   মোচির মুখ — kawaii ভঙ্গি
+//   Mochi Face — Kawaii Expressions
 //
-//   আপনার পাঠানো ইরেজারগুলোর ছবি ধরে ছয়টা ভঙ্গি বানানো, আর
-//   প্রতিটাকে মোচির এক-একটা অবস্থার সাথে জুড়ে দেওয়া হয়েছে।
-//   তাই পর্দা দেখেই বোঝা যায় সে কী করছে — কিছু পড়তে হয় না:
+//   Six facial expressions modeled after character erasers,
+//   each mapped directly to Mochi's operational states.
+//   Status is immediately recognizable without reading:
 //
-//     ফাঁকা আছে   ⟶  বড় গোল চোখ + মিষ্টি হাসি + গালে লালচে ছোপ
-//     শুনছে       ⟶  তারা-চোখ (মন দিয়ে শুনছে), ছোট হাঁ
-//     ভাবছে       ⟶  −_−  সরু চোখ, নিচে তিনটে বিন্দু ঘোরে
-//     বলছে        ⟶  ^ω^  খুশি চোখ, ঠোঁট কথার সাথে নড়ে
-//     অপেক্ষা      ⟶  T_T  কাঁদছে, চোখের নিচে জলের ফোঁটা
-//     সমস্যা       ⟶  >_<  চোখ কুঁচকে
+//     Idle       ⟶  Large round eyes + sweet smile + cheek blush
+//     Listening  ⟶  Star-eyes (attentive listening), slight open mouth
+//     Thinking   ⟶  -_- Narrow eyes with 3 rotating orbital dots
+//     Speaking   ⟶  ^ω^ Happy squinting eyes, lips animated to speech
+//     Waiting    ⟶  T_T Crying expression with teardrops
+//     Error      ⟶  >_< Scrunched squinting eyes
 // ════════════════════════════════════════════════════════════════
 #define EYE_L 44
 #define EYE_R 84
@@ -301,12 +301,12 @@ static void drawWxLabel(int y, int code) {
 #define MOUTH_CX 64
 #define MOUTH_CY 47
 
-// ── পর্দার জায়গা ভাগ করা (১২৮×৬৪) ──
-//   পেজ ০-১  (y  0..15) : নিচের-লাইনের লেখা — উপরে বসে
-//   পেজ ২-৪  (y 16..39) : চোখ, গাল, জলের ফোঁটা
-//   পেজ ৫-৬  (y 40..55) : ঠোঁট
-//   পেজ ৭    (y 56..63) : ফাঁকা
-// আগে লেখা আর হাসি একই জায়গায় পড়ত, একটা আরেকটাকে মুছে দিত।
+// ── Screen Layout Allocation (128x64) ──
+//   Pages 0-1 (y  0..15) : Status message text — positioned at top
+//   Pages 2-4 (y 16..39) : Eyes, cheeks, teardrops
+//   Pages 5-6 (y 40..55) : Mouth lip-sync window
+//   Page 7    (y 56..63) : Padding space
+// Separating text and face prevents status messages from overwriting smiles.
 #define TXTWIN_P0 0
 #define TXTWIN_P1 1
 #define EYEWIN_X0 20
@@ -316,7 +316,7 @@ static void drawWxLabel(int y, int code) {
 
 static bool     gBlink = false;
 static uint32_t gBlinkAt = 0;
-static bool     gWink = false;          // এক চোখ বন্ধ — মাঝে মাঝে
+static bool     gWink = false;          // Spontaneous single-eye wink
 static uint32_t gWinkAt = 0;
 static uint8_t  gMouth = 0;
 static uint8_t  gSpin  = 0;
@@ -336,7 +336,7 @@ static EyeStyle eyeFor(FaceState s) {
   }
 }
 
-// ── এক লাইন (তির্যক টানের জন্য) ──
+// ── Bresenham line (for diagonal blush strokes) ──
 static void line(int x0, int y0, int x1, int y1) {
   int dx = x1 - x0, dy = y1 - y0;
   int n = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy)
@@ -344,13 +344,13 @@ static void line(int x0, int y0, int x1, int y1) {
   if (n == 0) { px(x0, y0, true); return; }
   for (int i = 0; i <= n; i++) {
     px(x0 + dx * i / n, y0 + dy * i / n, true);
-    px(x0 + dx * i / n, y0 + dy * i / n + 1, true);   // ২ পিক্সেল মোটা
+    px(x0 + dx * i / n, y0 + dy * i / n + 1, true);   // 2-pixel thickness
   }
 }
 
-// ── একটা চোখ ──
+// ── Single Eye Renderer ──
 static void drawEye(int cx, int cy, EyeStyle st, bool closed) {
-  if (closed) {                                  // পলক — নিচু বাঁক
+  if (closed) {                                  // Blink — downward curved arc
     for (int dx = -6; dx <= 6; dx++) {
       int y = cy + 1 - (36 - dx * dx) / 30;
       px(cx + dx, y, true); px(cx + dx, y + 1, true);
@@ -360,13 +360,13 @@ static void drawEye(int cx, int cy, EyeStyle st, bool closed) {
   switch (st) {
     case EYE_ROUND:
       fillCircle(cx, cy, 7);
-      fillCircle(cx + 3, cy - 3, 2, false);       // ঝলক
-      fillCircle(cx - 2, cy + 3, 1, false);       // ছোট ঝলক
+      fillCircle(cx + 3, cy - 3, 2, false);       // Eye catchlight
+      fillCircle(cx - 2, cy + 3, 1, false);       // Secondary catchlight
       break;
 
     case EYE_SPARKLE:
       fillCircle(cx, cy, 7);
-      // চার-কোণা তারা — মন দিয়ে শোনার চোখ
+      // 4-pointed star — attentive listening eye
       for (int d = -3; d <= 3; d++) {
         int t = 3 - (d < 0 ? -d : d);
         for (int k = -t; k <= t; k++) px(cx + d + 1, cy - 2 + k, false);
@@ -374,21 +374,21 @@ static void drawEye(int cx, int cy, EyeStyle st, bool closed) {
       fillCircle(cx - 3, cy + 3, 1, false);
       break;
 
-    case EYE_HAPPY:                               // ^ — খুশিতে বোজা
+    case EYE_HAPPY:                               // ^ — Happy closed squint
       for (int dx = -7; dx <= 7; dx++) {
         int y = cy + 2 - (7 - (dx < 0 ? -dx : dx));
         px(cx + dx, y, true); px(cx + dx, y + 1, true);
       }
       break;
 
-    case EYE_FLAT:                                // − — ভাবছে
+    case EYE_FLAT:                                // - — Thinking expression
       fillRect(cx - 6, cy - 1, 13, 2);
       break;
 
-    case EYE_CRY:                                 // T — কাঁদছে
+    case EYE_CRY:                                 // T — Crying expression
       fillRect(cx - 6, cy - 6, 13, 2);
       fillRect(cx - 1, cy - 6, 3, 12);
-      fillCircle(cx + 6, cy + 9, 2);              // জলের ফোঁটা
+      fillCircle(cx + 6, cy + 9, 2);              // Teardrop
       px(cx + 6, cy + 6, true);
       break;
 
@@ -399,12 +399,12 @@ static void drawEye(int cx, int cy, EyeStyle st, bool closed) {
   }
 }
 
-// ── গালে লালচে ছোপ — তিনটে ছোট তির্যক টান ──
+// ── Cheek Blush — three small diagonal strokes ──
 static void drawBlush(int cx, int cy) {
   for (int i = 0; i < 3; i++)
     for (int k = 0; k < 5; k++) {
       px(cx + i * 5 + k,     cy + 4 - k, true);
-      px(cx + i * 5 + k + 1, cy + 4 - k, true);   // ২ পিক্সেল মোটা
+      px(cx + i * 5 + k + 1, cy + 4 - k, true);   // 2-pixel thickness
     }
 }
 
@@ -417,19 +417,19 @@ static void drawEyes() {
             (EYEWIN_P1 - EYEWIN_P0 + 1) * 8);
   EyeStyle st = eyeFor(gState);
   drawEye(EYE_L, EYE_Y, st, gBlink || gWink);
-  drawEye(EYE_R, EYE_Y, st, gBlink);              // wink হলে ডান চোখ খোলা
+  drawEye(EYE_R, EYE_Y, st, gBlink);              // Right eye stays open during wink
   if (blushFor(gState)) {
     drawBlush(EYE_L - 22, EYE_Y + 8);
     drawBlush(EYE_R + 11, EYE_Y + 8);
   }
 }
 
-// ── ঠোঁট ──
-// ধাপ ০ = বন্ধ (অবস্থা অনুযায়ী আকার), ১..৫ = যত জোরে কথা তত বড় হাঁ
+// ── Mouth Lip-Sync ──
+// Step 0 = Closed (state-dependent shape), 1..5 = Amplitude-proportional opening
 static void drawMouth(uint8_t step) {
   clearRect(MOUTH_X0, MOUTH_P0 * 8, MOUTH_X1 - MOUTH_X0 + 1, 16);
 
-  if (step > 0) {                                 // কথা বলছে — হাঁ
+  if (step > 0) {                                 // Speaking — mouth open
     int ry = 1 + step, rx = 10 + step / 2;
     fillEllipse(MOUTH_CX, MOUTH_CY, rx, ry);
     if (step >= 3) fillEllipse(MOUTH_CX, MOUTH_CY + 1, rx - 3, ry - 2, false);
@@ -437,7 +437,7 @@ static void drawMouth(uint8_t step) {
   }
 
   switch (gState) {
-    case FACE_SPEAKING:                           // ω — দুটো ছোট বাঁক
+    case FACE_SPEAKING:                           // ω — double cat-smile curves
       for (int s2 = 0; s2 < 2; s2++)
         for (int dx = -4; dx <= 4; dx++) {
           int y = MOUTH_CY - (16 - dx * dx) / 8;
@@ -446,16 +446,16 @@ static void drawMouth(uint8_t step) {
         }
       break;
 
-    case FACE_LISTENING:                          // ছোট গোল হাঁ
+    case FACE_LISTENING:                          // Small round 'O' mouth
       fillCircle(MOUTH_CX, MOUTH_CY, 4);
       fillCircle(MOUTH_CX, MOUTH_CY, 2, false);
       break;
 
-    case FACE_THINKING:                           // ছোট চ্যাপ্টা মুখ
+    case FACE_THINKING:                           // Small flat mouth
       fillRect(MOUTH_CX - 5, MOUTH_CY - 2, 11, 5);
       break;
 
-    case FACE_WAITING:                            // উল্টো বাঁক — মন খারাপ
+    case FACE_WAITING:                            // Inverted curve — sad mouth
       for (int dx = -7; dx <= 7; dx++) {
         int y = MOUTH_CY + (49 - dx * dx) / 18;
         px(MOUTH_CX + dx, y, true); px(MOUTH_CX + dx, y + 1, true);
@@ -467,24 +467,24 @@ static void drawMouth(uint8_t step) {
       fillRect(MOUTH_CX - 4, MOUTH_CY - 1, 9, 3, false);
       break;
 
-    default:                                      // মিষ্টি হাসি
+    default:                                      // Sweet resting smile
       for (int dx = -11; dx <= 11; dx++) {
         int y = MOUTH_CY + 4 - (121 - dx * dx) / 22;
         px(MOUTH_CX + dx, y, true); px(MOUTH_CX + dx, y + 1, true);
       }
-      // দু'পাশে ছোট টোল — এতেই হাসিটা মিষ্টি লাগে
+      // Subtle corner dimples — accentuates kawaii smile
       px(MOUTH_CX - 13, MOUTH_CY - 2, true); px(MOUTH_CX - 13, MOUTH_CY - 1, true);
       px(MOUTH_CX + 13, MOUTH_CY - 2, true); px(MOUTH_CX + 13, MOUTH_CY - 1, true);
       break;
   }
 }
 
-// ── অবস্থার লেখা (বাংলা বিটম্যাপ) — পর্দার উপরে ──
+// ── Status Message (Bengali Bitmap) — top of screen ──
 static void drawBottomText() {
   clearRect(0, 0, W, 16);
   if (gMsg == MSG_NONE) return;
 
-  if (gMsg == MSG_SEC_POR) {                      // "৩০০ সেকেন্ড পর"
+  if (gMsg == MSG_SEC_POR) {                      // Formats "After N seconds"
     char n[8];
     snprintf(n, sizeof(n), "%d", gWaitSec);
     int nw = bnNumWidth(n), lw = BN_MSG_W[MSG_SEC_POR];
@@ -498,18 +498,18 @@ static void drawBottomText() {
   drawBmp((W - w) / 2, 0, (const uint8_t *)pgm_read_ptr(&BN_MSG[gMsg]), w, BN_MSG_H);
 }
 
-// ───────────────────────── পর্দাগুলো ─────────────────────────
-// ঘণ্টা দেখে দিনের ভাগ বাছি। ইংরেজি AM/PM-এর বদলে বাংলা শব্দ —
-// বাংলা ঘড়িতে এটাই স্বাভাবিক, আর ১২-ঘণ্টার সময়টা কোন বেলার
-// তা-ও পরিষ্কার হয়।
+// ───────────────────────── Display Screens ─────────────────────────
+// Selects time-of-day index from hour. Replaces English AM/PM with natural
+// Bengali period terms, clarifying whether a 12-hour time is morning,
+// afternoon, evening, or night.
 static uint8_t partIdx(int h24) {
-  if (h24 < 4)  return 0;      // রাত
-  if (h24 < 6)  return 1;      // ভোর
-  if (h24 < 12) return 2;      // সকাল
-  if (h24 < 15) return 3;      // দুপুর
-  if (h24 < 18) return 4;      // বিকাল
-  if (h24 < 20) return 5;      // সন্ধ্যা
-  return 0;                    // রাত
+  if (h24 < 4)  return 0;      // Night
+  if (h24 < 6)  return 1;      // Dawn
+  if (h24 < 12) return 2;      // Morning
+  if (h24 < 15) return 3;      // Noon / Afternoon
+  if (h24 < 18) return 4;      // Late Afternoon
+  if (h24 < 20) return 5;      // Evening
+  return 0;                    // Night
 }
 static const uint8_t *partBmp(int h24) {
   return (const uint8_t *)pgm_read_ptr(&BN_PART[partIdx(h24)]);
@@ -523,12 +523,12 @@ static void drawClockScreen() {
     return;
   }
 
-  // ── তারিখ: ছোট সংখ্যায়, একদম উপরে ──
+  // ── Date: Small numerals at top ──
   char d[24];
   snprintf(d, sizeof(d), "%02d/%02d/%04d", gClk.day, gClk.mon, gClk.year);
   bnNumCentered(0, d);
 
-  // ── সময়: বড় করে, মাঝখানে। এটাই পর্দার মূল জিনিস ──
+  // ── Time: Large numerals in center (primary visual focus) ──
   int h12 = gClk.h24 % 12; if (h12 == 0) h12 = 12;
   char t[12], sec[6];
   snprintf(t,   sizeof(t),   "%02d:%02d", h12, gClk.mi);
@@ -536,12 +536,12 @@ static void drawClockScreen() {
 
   int tw = bnBigWidth(t), sw = bnNumWidth(sec);
   int tx = (W - (tw + 5 + sw)) / 2; if (tx < 0) tx = 0;
-  bnBig(tx, 15, t);                            // ঘণ্টা:মিনিট
-  bnNum(tx + tw + 5, 15, sec);                 // সেকেন্ড — ছোট, উপরে
-  // ── দিনের ভাগ: "সকাল / দুপুর / বিকাল..." — AM/PM নয় ──
+  bnBig(tx, 15, t);                            // Hour:Minute
+  bnNum(tx + tw + 5, 15, sec);                 // Seconds — small numeral
+  // ── Time of Day descriptor: "Morning / Noon / Afternoon..." — replaces AM/PM ──
   drawBmp(tx + tw + 5, 28, partBmp(gClk.h24), partW(gClk.h24), BN_PART_H);
 
-  // ── বার: বিটম্যাপ, নিচে ──
+  // ── Day of Week: Pre-rendered bitmap at bottom ──
   drawDayName(H - BN_DAY_H + 1, gClk.dow);
 }
 
@@ -553,7 +553,7 @@ static void drawWeatherScreen() {
             BN_MSG_W[MSG_WIFI_NEI], BN_MSG_H);
     return;
   }
-  // তাপমাত্রা — বড় সংখ্যা, পাশে ডিগ্রির চিহ্ন
+  // Temperature — large numerals with degree symbol
   char t[12];
   snprintf(t, sizeof(t), "%d", (int)(gWx.t + 0.5f));
   int tw = bnBigWidth(t);
@@ -563,9 +563,9 @@ static void drawWeatherScreen() {
   fillCircle(tx + tw + 5, 8, 1, false);
   drawText(tx + tw + 10, 12, "C");
 
-  drawWxLabel(26, gWx.code);                   // কথাটা — বিটম্যাপ
+  drawWxLabel(26, gWx.code);                   // Condition descriptor bitmap
 
-  // আর্দ্রতা — ছোট করে নিচে
+  // Humidity — small numerals at bottom
   char hu[12];
   snprintf(hu, sizeof(hu), "%d", gWx.hum);
   int hw = BN_ARDROTA_W + 4 + bnNumWidth(hu) + 7;
@@ -576,18 +576,18 @@ static void drawWeatherScreen() {
 }
 
 static void drawPomoScreen() {
-  // ⚠️ এখানে শুধু সময়টাই লেখা — "পড়ার সময়" লেখা বাদ, কারণ
-  //    যুক্তাক্ষর ভাঙার ঝুঁকি নেওয়ার দরকার নেই। বিরতির সময় শুধু
-  //    "বিরতি" শব্দটা ওপরে বসে, তাতেই বোঝা যায় কোন পর্যায়।
+  // ⚠️ Displays elapsed time — omits redundant text to prevent broken conjuncts.
+  //    During breaks, the "Break" label appears at top to clarify phase.
+  //
   if (gPomo.brk)
     drawBmp((W - BN_BIROTI_W) / 2, 0, BN_BIROTI, BN_BIROTI_W, BN_BIROTI_H);
 
-  // ⚠️ উচ্চতার হিসাব — ৬৪ পিক্সেলে সব আঁটতে হবে, নইলে নিচের
-  //    লেখার "ু"-কার কেটে যায় (আগে ঠিক সেটাই হচ্ছিল):
-  //      y  0..13  "বিরতি" (শুধু বিরতির সময়)
-  //      y 16..29  সময় — বড় সংখ্যা
-  //      y 34..39  অগ্রগতির বার
-  //      y 46..59  "চলছে" / "ছুঁয়ে ধরুন"
+  // ⚠️ Vertical layout budget (fitted into 64 pixels):
+  //
+  //      y  0..13  "Break" label (only during break)
+  //      y 16..29  Time — large numerals
+  //      y 34..39  Progress bar
+  //      y 46..59  "Running" / "Hold to Start" status
   char t[12];
   int pm = gPomo.secLeft / 60, ps = gPomo.secLeft % 60;
   if (pm > 99) pm = 99;
@@ -595,7 +595,7 @@ static void drawPomoScreen() {
   snprintf(t, sizeof(t), "%02d:%02d", pm, ps);
   bnBigCentered(13, t);
 
-  // অগ্রগতির বার
+  // Progress bar
   int total = gPomo.brk ? 5 * 60 : 25 * 60;
   int w = (W - 24) * (total - gPomo.secLeft) / (total ? total : 1);
   if (w < 0) w = 0;
@@ -609,22 +609,21 @@ static void drawPomoScreen() {
     drawBmp((W - BN_CHEPE_W) / 2, 45, BN_CHEPE, BN_CHEPE_W, BN_CHEPE_H);
 }
 
-// ───────────────────── টাইমারের পর্দা ─────────────────────
-// পমোডোরোর মতোই সাজ, তাই চেনা লাগবে। তফাত শুধু উপরের শব্দটা
-// ("টাইমার") আর নিচের লাইনটা — কোন ভঙ্গিতে আছি সেটা ওখানেই বলা।
+// ───────────────────── Custom Timer Screen ─────────────────────
+// Layout mirrors Pomodoro for visual consistency. Differentiated by top header
+// ("Timer") and bottom status line indicating current mode.
 //
-// ⚠️ উচ্চতার হিসাব (৬৪ পিক্সেলে সব আঁটতে হবে):
-//      y  2..14  "টাইমার"
-//      y 18..31  সময় — বড় সংখ্যা
-//      y 34..39  অগ্রগতির বার
-//      y 46..59  নিচের লাইন
-//    মাঝের ফাঁকা সারিগুলো ইচ্ছে করেই রাখা — "টাইমার"-এর নিচে
-//    আগে মাত্র এক সারি ফাঁকা ছিল, দেখতে গায়ে-গায়ে লাগছিল।
+// ⚠️ Vertical layout budget (fitted into 64 pixels):
+//      y  2..14  "Timer" header
+//      y 18..31  Time — large numerals
+//      y 34..39  Progress bar
+//      y 46..59  Bottom status line
+//    Spacing rows intentionally left blank for visual balance.
 static void drawTimerScreen() {
   drawBmp((W - BN_TIMER_W) / 2, 0, BN_TIMER, BN_TIMER_W, BN_TIMER_H);
 
-  // ── মাঝের বড় সংখ্যা ──
-  // বসানোর ভঙ্গিতে "১৫ মিনিট", বাকি সব সময় "MM:SS"
+  // ── Center Digits ──
+  // In setting mode displays "N Min", otherwise displays "MM:SS"
   if (gTmr.mode == TM_SET) {
     char m[8];
     snprintf(m, sizeof(m), "%d", gTmr.setMin);
@@ -633,8 +632,8 @@ static void drawTimerScreen() {
     bnBig(mx, 15, m);
     drawBmp(mx + mw + 4, 18, BN_MINIT, BN_MINIT_W, BN_MINIT_H);
   } else if (gTmr.mode != TM_DONE || gTmr.blink) {
-    // TM_DONE-এ blink false হলে সংখ্যাটা এই ডাকে আঁকি না — তাতেই
-    // পর্দা জ্বলে-নেভে। আলাদা কোনো টাইমার লাগে না।
+    // In TM_DONE mode, toggling blink suppresses drawing numerals on alternate frames,
+    // producing a flashing alert effect without extra timers.
     char t[12];
     int mm = gTmr.secLeft / 60, ss = gTmr.secLeft % 60;
     if (mm > 99) mm = 99;
@@ -643,7 +642,7 @@ static void drawTimerScreen() {
     bnBigCentered(15, t);
   }
 
-  // ── অগ্রগতির বার — কতটা পেরিয়েছে ──
+  // ── Progress Bar — elapsed percentage ──
   if (gTmr.mode == TM_RUN || gTmr.mode == TM_PAUSE) {
     int tot = gTmr.totalSec > 0 ? gTmr.totalSec : 1;
     int gone = tot - gTmr.secLeft;
@@ -654,7 +653,7 @@ static void drawTimerScreen() {
     fillRect(12, 34, w, 6);
   }
 
-  // ── নিচের লাইন ──
+  // ── Bottom Status Line ──
   switch (gTmr.mode) {
     case TM_SET:
       drawBmp((W - BN_BOSAN_W) / 2, 45, BN_BOSAN, BN_BOSAN_W, BN_BOSAN_H);
@@ -677,18 +676,18 @@ static void drawTimerScreen() {
   }
 }
 
-// ⭐ মুখটা এখন পর্দায় আছে কি?
-// এই একটা প্রশ্নের উত্তরেই সব ঠিক হয়। আগে faceTick() পর্দার কথা
-// না ভেবেই চোখের পলক আর ভাবনার বিন্দু এঁকে পাঠিয়ে দিত — তাই
-// পমোডোরো বা ঘড়ি চলার মাঝখানে হঠাৎ মুখ এসে পড়ত।
+// ⭐ Is the face currently visible on screen?
+// Determines whether animated ticks (blinks, thinking dots) should render.
+// Prevents face animations from unexpectedly interrupting clock
+// or pomodoro screens.
 static bool showingFace() {
   if (gState == FACE_LISTENING || gState == FACE_THINKING ||
-      gState == FACE_SPEAKING) return true;          // কাজে আছে — মুখ
+      gState == FACE_SPEAKING) return true;          // Active interaction — display face
   if (gState == FACE_IDLE)      return gScreen == SCR_FACE;
-  return gState == FACE_WAITING;                     // অপেক্ষার পর্দাতেও মুখ
+  return gState == FACE_WAITING;                     // Waiting screen also shows face
 }
 
-// ───────────────────────── পুরো পর্দা ─────────────────────────
+// ───────────────────────── Full Screen Redraw ─────────────────────────
 static void redrawAll() {
   memset(fb, 0, sizeof(fb));
 
@@ -711,7 +710,7 @@ static void redrawAll() {
     case FACE_PORTAL:
       drawBmp((W - BN_SETUP_W) / 2, 0, BN_SETUP, BN_SETUP_W, BN_SETUP_H);
       drawBmp((W - BN_PHONE_W) / 2, 22, BN_PHONE, BN_PHONE_W, BN_PHONE_H);
-      // হটস্পটের নাম-পাসওয়ার্ড রোমানেই, কারণ ফোনে ঠিক এভাবেই দেখাবে
+      // Hotspot SSID/password displayed in Roman characters to match phone WiFi settings
       drawTextCentered(44, "StudyMochi-Direct");
       drawTextCentered(54, "mochi1234");
       pushAll();
@@ -727,7 +726,7 @@ static void redrawAll() {
   pushAll();
 }
 
-// ───────────────────────── বাইরের জন্য ─────────────────────────
+// ───────────────────────── Public API ─────────────────────────
 bool faceBegin(int sda, int scl, uint8_t addr) {
   gAddr = addr;
   Wire.begin(sda, scl);
@@ -735,10 +734,8 @@ bool faceBegin(int sda, int scl, uint8_t addr) {
 
   Wire.beginTransmission(gAddr);
   if (Wire.endTransmission() != 0) {
-    // ⚠️ ঠিকানায় সাড়া নেই। বেশিরভাগ SSD1306 মডিউল 0x3C, কিছু 0x3D।
-    //    তাই চুপ করে হাল না ছেড়ে পুরো বাসটা একবার খুঁজে দেখি —
-    //    কী পাওয়া গেল সেটা Serial-এ বলে দিই, তাহলে আর আন্দাজ
-    //    করতে হবে না।
+    // ⚠️ No response at default address. Most SSD1306 modules use 0x3C, some 0x3D.
+    //    Scan entire I2C bus and report detected devices via Serial to aid debugging.
     Serial.printf("[oled] 0x%02X-e sara nei. I2C bus khunjchi...\n", gAddr);
     uint8_t found = 0;
     for (uint8_t a = 1; a < 127; a++) {
@@ -754,31 +751,31 @@ bool faceBegin(int sda, int scl, uint8_t addr) {
       gOk = false;
       return false;
     }
-    // যা পেলাম সেটাই ব্যবহার করি — ঠিকানা নিয়ে আর ভাবতে হবে না
+    // Use discovered address automatically
     Serial.printf("[oled] 0x%02X diye cheshta korchi\n", found);
     gAddr = found;
   }
   gOk = true;
 
   static const uint8_t init[] = {
-    0xAE,             // ঘুমাও
-    0xD5, 0x80,       // ক্লক
-    0xA8, 0x3F,       // ৬৪ সারি
-    0xD3, 0x00,       // অফসেট নেই
-    0x40,             // শুরুর লাইন ০
-    // চার্জ পাম্প — দুই কন্ট্রোলারের দুই কমান্ড, দুটোই পাঠাই।
-    // যারটা নিজের নয় সেটা সে চুপচাপ ফেলে দেয়।
+    0xAE,             // Display OFF (sleep)
+    0xD5, 0x80,       // Display clock divide ratio
+    0xA8, 0x3F,       // Multiplex ratio: 64 rows
+    0xD3, 0x00,       // Display offset 0
+    0x40,             // Start line 0
+    // Charge pump — send enable sequences for both SSD1306 and SH1106 controllers.
+    // The unapplicable command is ignored safely by the controller.
     0x8D, 0x14,       // SSD1306
     0xAD, 0x8B,       // SH1106
-    0x20, 0x02,       // ⭐ page addressing — দুটোতেই নিরাপদ
-    0xA1, 0xC8,       // ঠিকমুখো
+    0x20, 0x02,       // ⭐ Page addressing mode — safe on both controllers
+    0xA1, 0xC8,       // Segment remap & COM output scan direction
     0xDA, 0x12,
-    0x81, 0xCF,       // উজ্জ্বলতা
+    0x81, 0xCF,       // Contrast control
     0xD9, 0xF1,
     0xDB, 0x40,
-    0xA4,             // RAM থেকেই দেখাও
-    0xA6,             // স্বাভাবিক (উল্টো নয়)
-    0xAF,             // জাগো
+    0xA4,             // Resume to RAM content display
+    0xA6,             // Normal display (non-inverted)
+    0xAF,             // Display ON (wake)
   };
   for (size_t i = 0; i < sizeof(init); i++) cmd(init[i]);
   Serial.printf("[oled] panel: %s (col offset %u)\n",
@@ -793,8 +790,8 @@ bool faceBegin(int sda, int scl, uint8_t addr) {
 
 bool faceOk() { return gOk; }
 
-// SH1106 আর SSD1306-এর মধ্যে বদল। ছবি ২ পিক্সেল সরে গেলে বা
-// পর্দায় আবর্জনা থাকলে এটাই উল্টে দেখুন।
+// Toggle between SH1106 and SSD1306 modes. Invert this if image is shifted
+// 2 pixels or display shows visual noise.
 void faceSetPanel(bool sh1106) {
   gSH1106 = sh1106;
   gColOff = sh1106 ? 2 : 0;
@@ -817,7 +814,7 @@ void faceSetMsg(FaceMsg m) {
   if (m < 0 || m >= BN_MSG_N) m = MSG_NONE;
   if (m == gMsg) return;
   gMsg = m;
-  if (!gOk || !showingFace()) return;   // অন্য পর্দার নিচের লাইন মুছব না
+  if (!gOk || !showingFace()) return;   // Do not overwrite bottom line on other screens
   drawBottomText();
   pushWindow(0, W - 1, TXTWIN_P0, TXTWIN_P1);
 }
@@ -830,18 +827,18 @@ void faceSetWait(int seconds) {
   pushWindow(0, W - 1, TXTWIN_P0, TXTWIN_P1);
 }
 
-// ⭐ কথার সাথে ঠোঁট। level ০..২৫৫ → ধাপ ০..৫
+// ⭐ Speech lip-sync. Audio level 0..255 mapped to steps 0..5
 void faceMouth(uint8_t level) {
   if (!gOk || !showingFace()) return;
-  uint8_t step = level / 43;               // ২৫৫/৪৩ ≈ ৫
+  uint8_t step = level / 43;               // 255 / 43 ≈ 5 steps
   if (step > 5) step = 5;
-  if (step == gMouth) return;              // বদলায়নি — I2C বাঁচাই
+  if (step == gMouth) return;              // No change — save I2C bandwidth
   gMouth = step;
   drawMouth(step);
-  pushWindow(MOUTH_X0, MOUTH_X1, MOUTH_P0, MOUTH_P1);   // ~৮২ বাইট
+  pushWindow(MOUTH_X0, MOUTH_X1, MOUTH_P0, MOUTH_P1);   // ~82 bytes
 }
 
-// শোনার সময় মাইকের লেভেল — নিচে একটা বার
+// Microphone VU level meter during recording — horizontal bar at bottom
 void faceMicLevel(uint8_t level) {
   if (!gOk || !showingFace()) return;
   static uint8_t last = 255;
@@ -896,10 +893,10 @@ void facePomoData(int secLeft, bool running, bool isBreak, int roundsDone) {
 
 void faceTick() {
   if (!gOk) return;
-  if (!showingFace()) return;         // ⚠️ ঘড়ি/পমোডোরোর ওপর মুখ আঁকব না
+  if (!showingFace()) return;         // ⚠️ Do not render face animations over clock/pomodoro
   uint32_t now = millis();
 
-  // ── চোখের পলক ──
+  // ── Eye Blinking ──
   if (gState == FACE_IDLE || gState == FACE_SPEAKING ||
       gState == FACE_LISTENING) {
     if (!gBlink && now > gBlinkAt) {
@@ -911,7 +908,7 @@ void faceTick() {
     }
   }
 
-  // ── মাঝে মাঝে এক চোখ টিপে দেয় — শুধু ফাঁকা থাকলে ──
+  // ── Occasional spontaneous winking animation (only when idle) ──
   if (gState == FACE_IDLE && !gBlink) {
     if (!gWink && now > gWinkAt) {
       gWink = true;  gWinkAt = now + 260;
@@ -924,7 +921,7 @@ void faceTick() {
     gWink = false;
   }
 
-  // ── ভাবছে: তিনটে বিন্দু ঘোরে ──
+  // ── Thinking animation: 3 rotating orbital dots ──
   if (gState == FACE_THINKING) {
     static uint32_t next = 0;
     if (now > next) {

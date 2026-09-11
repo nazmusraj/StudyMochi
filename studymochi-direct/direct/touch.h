@@ -1,43 +1,42 @@
 // ════════════════════════════════════════════════════════════════
-//   TTP223 টাচ সেন্সর — ছোঁয়া, ট্যাপ আর চেপে ধরা আলাদা করে চেনে।
+//   TTP223 Touch Sensor — Distinguishes touches, taps, and long presses.
 //
-//   ওয়্যারিং (প্রতিটা মডিউলে ৩টা পিন):
+//   Wiring (3 pins per module):
 //       VCC → 3V3      GND → GND      OUT/SIG → GPIO
 //
-//   TTP223 ছুঁলে OUT **HIGH** হয় (ডিফল্ট সেটিং)। কিছু মডিউলে
-//   পেছনে A/B প্যাড জোড়া দিয়ে উল্টো করা যায় — উল্টো হলে
-//   TOUCH_ACTIVE_LOW 1 করে দিন।
+//   TTP223 defaults to active HIGH when touched. Some modules allow
+//   inverting this by bridging solder pads A/B on the back — if inverted,
+//   set TOUCH_ACTIVE_LOW to 1.
 //
-//   কেন আলাদা ফাইল: বাটনের হিসাব (ঝাঁকুনি সরানো, ট্যাপ বনাম
-//   চেপে ধরা) এক জায়গায় থাকলে direct.ino পরিষ্কার থাকে, আর
-//   পিসিতে টেস্টও করা যায়।
+//   Why a dedicated file: Encapsulating button logic (debouncing, tap vs.
+//   hold detection) keeps direct.ino clean and facilitates PC unit testing.
 // ════════════════════════════════════════════════════════════════
 #pragma once
 #include <Arduino.h>
 
-// মডিউল উল্টো হলে ১ করুন
+// Set to 1 if the module output is active LOW
 #ifndef TOUCH_ACTIVE_LOW
 #define TOUCH_ACTIVE_LOW 0
 #endif
 
-#define TOUCH_DEBOUNCE_MS 40      // ঝাঁকুনি সরাতে
-#define TOUCH_HOLD_MS     600     // এর বেশি ধরলে "চেপে ধরা"
+#define TOUCH_DEBOUNCE_MS 40      // Debounce window to filter electrical noise
+#define TOUCH_HOLD_MS     600     // Duration after which a touch is registered as a "hold"
 
 class Touch {
 public:
   void begin(int pin);
 
-  // loop()-এ বারবার ডাকুন। এখনকার সময়টা বাইরে থেকে দিই যাতে
-  // পিসিতে টেস্ট করা যায় (millis() নকল করা যায়)।
+  // Call periodically in loop(). Timestamp passed externally to allow
+  // mocking millis() in desktop test environments.
   void update(uint32_t now);
 
-  bool isDown() const { return _stable; }          // এখন ছোঁয়া আছে কি
-  uint32_t heldMs(uint32_t now) const;             // কতক্ষণ ধরে
+  bool isDown() const { return _stable; }          // Current contact state
+  uint32_t heldMs(uint32_t now) const;             // Contact duration in milliseconds
 
-  // ── ঘটনা: একবারই true দেয়, পড়ে নিলেই মুছে যায় ──
-  bool tookTap();        // ছোট ছোঁয়া (ছেড়ে দেওয়ার পর)
-  bool tookHold();       // চেপে ধরা শুরু হলো (ছাড়ার অপেক্ষা নয়)
-  bool tookRelease();    // ছেড়ে দিল
+  // ── Events: Returns true once, auto-clearing on read ──
+  bool tookTap();        // Short tap (triggered on release)
+  bool tookHold();       // Long press started (does not wait for release)
+  bool tookRelease();    // Contact released
 
 private:
   int      _pin      = -1;

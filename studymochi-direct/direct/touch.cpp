@@ -2,8 +2,8 @@
 
 void Touch::begin(int pin) {
   _pin = pin;
-  // TTP223 নিজেই শক্ত করে HIGH/LOW দেয়, তাই pull-up/down লাগে না।
-  // তবু INPUT_PULLDOWN দিলে তার খুলে গেলে "সবসময় ছোঁয়া" হয়ে যায় না।
+  // TTP223 actively drives output HIGH/LOW, so external pull-up/down is not required.
+  // However, configuring INPUT_PULLDOWN prevents floating false-positives if a wire disconnects.
 #if TOUCH_ACTIVE_LOW
   pinMode(_pin, INPUT_PULLUP);
 #else
@@ -25,17 +25,17 @@ void Touch::update(uint32_t now) {
   bool raw = (v == HIGH);
 #endif
 
-  // ── ঝাঁকুনি সরাই ──
-  // আঙুল ছোঁয়ানোর মুহূর্তে সংকেত কয়েকবার লাফায়। তাই মান বদলালে
-  // সাথে সাথে বিশ্বাস করি না — TOUCH_DEBOUNCE_MS ধরে একই থাকলে
-  // তবেই "সত্যি বদলেছে" ধরি।
+  // ── Debounce Filtering ──
+  // Touch contact generates transient bouncing. Value changes are not accepted
+  // immediately; the state must remain stable for TOUCH_DEBOUNCE_MS before
+  // confirming a valid state transition.
   if (raw != _raw) {
     _raw = raw;
     _changed = now;
     return;
   }
   if (raw == _stable) {
-    // অবস্থা বদলায়নি — শুধু চেপে ধরা হয়েছে কি না দেখি
+    // State unchanged — check if hold duration threshold is reached
     if (_stable && !_holdSent && (now - _downAt) >= TOUCH_HOLD_MS) {
       _holdSent = true;
       _hold = true;
@@ -44,14 +44,14 @@ void Touch::update(uint32_t now) {
   }
   if (now - _changed < TOUCH_DEBOUNCE_MS) return;
 
-  // ── সত্যিকারের বদল ──
+  // ── Valid State Transition ──
   _stable = raw;
   if (_stable) {
     _downAt = now;
     _holdSent = false;
   } else {
     _rel = true;
-    // চেপে ধরা হয়ে থাকলে সেটা আর "ট্যাপ" নয়
+    // If a hold was already dispatched, do not register a tap on release
     if (!_holdSent) _tap = true;
   }
 }

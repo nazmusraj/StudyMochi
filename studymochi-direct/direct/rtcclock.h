@@ -1,16 +1,15 @@
 // ════════════════════════════════════════════════════════════════
-//   DS3231 ঘড়ি — সময় জমা থাকে, কারেন্ট গেলেও হারায় না।
+//   DS3231 RTC Clock — Preserves time across power cuts with backup battery.
 //
-//   ওয়্যারিং — OLED-এর সাথে **একই I2C বাসে**, বাড়তি পিন লাগে না:
+//   Wiring — Shared on the SAME I2C bus as the OLED, requiring no extra pins:
 //       VCC → 3V3      GND → GND      SDA → GPIO 21     SCL → GPIO 22
-//   (DS3231-এর ঠিকানা 0x68, OLED-এর 0x3C — সংঘর্ষ নেই)
+//   (DS3231 address 0x68, OLED address 0x3C — no address conflict)
 //
-//   সময় বসানো হয় দু'ভাবে:
-//     ১) WiFi থাকলে **NTP** থেকে — সবচেয়ে নির্ভুল, নিজে নিজে
-//     ২) NTP না পেলে কম্পাইলের সময়টা (আপনার আগের কোড যা করত)
+//   Time is synchronized in two ways:
+//     1) Via NTP when WiFi is connected — highly accurate, automatic
+//     2) Fallback to firmware compilation time when NTP is unavailable
 //
-//   RTClib লাইব্রেরি লাগবে (Adafruit) — আপনার RTC_clock.ino-তে
-//   এটাই ব্যবহার করেছেন, তাই ইনস্টল করাই আছে।
+//   Requires RTClib library (Adafruit).
 // ════════════════════════════════════════════════════════════════
 #pragma once
 #include <Arduino.h>
@@ -18,25 +17,26 @@
 struct MochiTime {
   int  hour24 = 0, minute = 0, second = 0;
   int  day = 1, month = 1, year = 2026;
-  int  dow = 0;              // ০ = রবিবার
+  int  dow = 0;              // 0 = Sunday
   bool valid = false;
 };
 
-// RTC খুঁজে চালু করে। না পেলে false — কোড তবু চলবে,
-// শুধু ঘড়ির পর্দাটা "RTC নেই" দেখাবে।
+// Initializes and verifies RTC. Returns false if not detected;
+// firmware continues executing, but clock screen displays "No RTC".
 bool clockBegin();
 bool clockOk();
 
 MochiTime clockNow();
 
-// WiFi জুড়ে যাওয়ার পর একবার ডাকুন। NTP থেকে সময় এনে DS3231-এ
-// বসায় (২ সেকেন্ডের বেশি ফারাক হলেই)। সফল হলে true।
-bool clockSyncNTP(long gmtOffsetSec = 6 * 3600);   // বাংলাদেশ = UTC+6
+// Call once WiFi connection is established. Synchronizes time from NTP
+// into the DS3231 if drift exceeds 2 seconds. Returns true on success.
+bool clockSyncNTP(long gmtOffsetSec = 6 * 3600);   // Bangladesh = UTC+6
 
-// কম্পাইলের সময়টা বসায় — NTP না পেলে শেষ ভরসা
+// Sets RTC to build/compile timestamp — last resort if NTP is unavailable
 void clockSetFromBuild();
 
-// "১১:৩৪" ধরনের বাংলা লেখা বানায় (UTF-8)
+// Converts integer to Bengali numerals in UTF-8 (e.g. "11:34" in Bengali digits)
 String banglaDigits(int n, int pad = 0);
-const char *banglaDayName(int dow);       // "শুক্রবার"
-const char *banglaMonthName(int m);       // "সেপ্টেম্বর"
+const char *banglaDayName(int dow);       // e.g. Bengali name for Friday
+const char *banglaMonthName(int m);       // e.g. Bengali name for September
+
