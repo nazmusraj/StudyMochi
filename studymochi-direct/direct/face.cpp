@@ -314,6 +314,8 @@ static void drawWxLabel(int y, int code) {
 #define EYEWIN_P0 2
 #define EYEWIN_P1 4
 
+static void redrawAll();
+
 static bool     gBlink = false;
 static uint32_t gBlinkAt = 0;
 static bool     gWink = false;          // Spontaneous single-eye wink
@@ -323,7 +325,60 @@ static uint8_t  gSpin  = 0;
 static FaceMsg  gMsg   = MSG_NONE;
 static int      gWaitSec = 0;
 
-enum EyeStyle { EYE_ROUND, EYE_SPARKLE, EYE_HAPPY, EYE_FLAT, EYE_CRY, EYE_SQUINT };
+static int gSquishX = 0;
+static int gSquishY = 0;
+
+void faceSetSquish(int offX, int offY) {
+  if (gSquishX == offX && gSquishY == offY) return;
+  gSquishX = offX;
+  gSquishY = offY;
+  if (gOk && (gScreen == SCR_FACE || gState != FACE_IDLE)) {
+    redrawAll();
+  }
+}
+
+
+static struct {
+  uint32_t ms;
+  bool run;
+} gSw = {0, false};
+
+void faceStopwatchData(uint32_t elapsedMs, bool running) {
+  gSw.ms = elapsedMs;
+  gSw.run = running;
+}
+
+static struct {
+  int secLeft, totalSec;
+  bool run;
+  int phase, rounds;
+  char label[12];
+} gPomoExt = { 25 * 60, 25 * 60, false, 0, 1, "25-5" };
+
+void facePomoDataExt(int secLeft, int totalSec, bool running, int phase, int round, const char* presetLabel) {
+  gPomoExt.secLeft = secLeft;
+  gPomoExt.totalSec = (totalSec > 0 ? totalSec : 1);
+  gPomoExt.run = running;
+  gPomoExt.phase = phase;
+  gPomoExt.rounds = round;
+  if (presetLabel) {
+    strncpy(gPomoExt.label, presetLabel, sizeof(gPomoExt.label) - 1);
+    gPomoExt.label[sizeof(gPomoExt.label) - 1] = '\0';
+  }
+}
+
+enum EyeStyle {
+  EYE_ROUND,
+  EYE_SPARKLE,
+  EYE_HAPPY,
+  EYE_FLAT,
+  EYE_CRY,
+  EYE_SQUINT,
+  EYE_HEART,
+  EYE_ANGRY,
+  EYE_SPIRAL,
+  EYE_SLEEPY
+};
 
 static EyeStyle eyeFor(FaceState s) {
   switch (s) {
@@ -332,6 +387,12 @@ static EyeStyle eyeFor(FaceState s) {
     case FACE_SPEAKING:  return EYE_HAPPY;
     case FACE_WAITING:   return EYE_CRY;
     case FACE_ERROR:     return EYE_SQUINT;
+    case FACE_CUDDLE:    return EYE_HEART;
+    case FACE_ANGRY:     return EYE_ANGRY;
+    case FACE_DIZZY:     return EYE_SPIRAL;
+    case FACE_SLEEPY:    return EYE_SLEEPY;
+    case FACE_ECSTATIC:  return EYE_SPARKLE;
+    case FACE_HAPPY:     return EYE_HAPPY;
     default:             return EYE_ROUND;
   }
 }
@@ -348,7 +409,7 @@ static void line(int x0, int y0, int x1, int y1) {
   }
 }
 
-// ── Single Eye Renderer ──
+// ── Single Eye Renderer with Kawaii & Squish Shapes ──
 static void drawEye(int cx, int cy, EyeStyle st, bool closed) {
   if (closed) {                                  // Blink — downward curved arc
     for (int dx = -6; dx <= 6; dx++) {
@@ -393,8 +454,36 @@ static void drawEye(int cx, int cy, EyeStyle st, bool closed) {
       break;
 
     case EYE_SQUINT:                              // >  <
-      if (cx == EYE_L) { line(cx - 5, cy - 5, cx + 4, cy); line(cx - 5, cy + 5, cx + 4, cy); }
-      else             { line(cx + 5, cy - 5, cx - 4, cy); line(cx + 5, cy + 5, cx - 4, cy); }
+      if (cx <= MOUTH_CX) { line(cx - 5, cy - 5, cx + 4, cy); line(cx - 5, cy + 5, cx + 4, cy); }
+      else                { line(cx + 5, cy - 5, cx - 4, cy); line(cx + 5, cy + 5, cx - 4, cy); }
+      break;
+
+    case EYE_HEART:                               // ♥ — Heart eye for cuddle
+      fillCircle(cx - 3, cy - 2, 3);
+      fillCircle(cx + 3, cy - 2, 3);
+      for (int dy = 0; dy <= 6; dy++) {
+        int w = 6 - dy;
+        for (int dx = -w; dx <= w; dx++) px(cx + dx, cy + dy, true);
+      }
+      break;
+
+    case EYE_ANGRY:                               // X — Angry cross eye
+      line(cx - 5, cy - 5, cx + 5, cy + 5);
+      line(cx - 5, cy + 5, cx + 5, cy - 5);
+      break;
+
+    case EYE_SPIRAL:                              // @_@ — Dizzy spiral eye
+      for (int r = 2; r <= 6; r += 2) {
+        for (int a = 0; a < 12; a++) {
+          int sx = cx + (int)(cos(a * 0.52f) * r);
+          int sy = cy + (int)(sin(a * 0.52f) * r);
+          px(sx, sy, true);
+        }
+      }
+      break;
+
+    case EYE_SLEEPY:                              // ~ — Relaxed droop
+      fillRect(cx - 6, cy + 1, 13, 2);
       break;
   }
 }
@@ -409,30 +498,55 @@ static void drawBlush(int cx, int cy) {
 }
 
 static bool blushFor(FaceState s) {
-  return s == FACE_IDLE || s == FACE_LISTENING || s == FACE_SPEAKING;
+  return s == FACE_IDLE || s == FACE_LISTENING || s == FACE_SPEAKING ||
+         s == FACE_HAPPY || s == FACE_CUDDLE || s == FACE_ECSTATIC;
 }
 
 static void drawEyes() {
-  clearRect(EYEWIN_X0, EYEWIN_P0 * 8, EYEWIN_X1 - EYEWIN_X0 + 1,
-            (EYEWIN_P1 - EYEWIN_P0 + 1) * 8);
+  // Clear eye area
+  clearRect(0, EYEWIN_P0 * 8, W, (EYEWIN_P1 - EYEWIN_P0 + 1) * 8);
+
   EyeStyle st = eyeFor(gState);
-  drawEye(EYE_L, EYE_Y, st, gBlink || gWink);
-  drawEye(EYE_R, EYE_Y, st, gBlink);              // Right eye stays open during wink
+
+  // Apply squish physics offsets
+  int cxL = EYE_L + gSquishX;
+  int cxR = EYE_R + gSquishX;
+  int cy  = EYE_Y + gSquishY;
+
+  // Keep within OLED display boundaries
+  if (cxL < 8)   cxL = 8;
+  if (cxL > 58)  cxL = 58;
+  if (cxR < 70)  cxR = 70;
+  if (cxR > 120) cxR = 120;
+  if (cy < 18)   cy = 18;
+  if (cy > 36)   cy = 36;
+
+  drawEye(cxL, cy, st, gBlink || gWink);
+  drawEye(cxR, cy, st, gBlink);              // Right eye stays open during wink
+
   if (blushFor(gState)) {
-    drawBlush(EYE_L - 22, EYE_Y + 8);
-    drawBlush(EYE_R + 11, EYE_Y + 8);
+    drawBlush(cxL - 20, cy + 8);
+    drawBlush(cxR + 10, cy + 8);
   }
 }
+
 
 // ── Mouth Lip-Sync ──
 // Step 0 = Closed (state-dependent shape), 1..5 = Amplitude-proportional opening
 static void drawMouth(uint8_t step) {
-  clearRect(MOUTH_X0, MOUTH_P0 * 8, MOUTH_X1 - MOUTH_X0 + 1, 16);
+  clearRect(0, MOUTH_P0 * 8, W, 16);
+
+  int mcx = MOUTH_CX + (gSquishX * 3 / 4);
+  int mcy = MOUTH_CY + (gSquishY * 3 / 4);
+  if (mcx < 30) mcx = 30;
+  if (mcx > 98) mcx = 98;
+  if (mcy < 42) mcy = 42;
+  if (mcy > 58) mcy = 58;
 
   if (step > 0) {                                 // Speaking — mouth open
     int ry = 1 + step, rx = 10 + step / 2;
-    fillEllipse(MOUTH_CX, MOUTH_CY, rx, ry);
-    if (step >= 3) fillEllipse(MOUTH_CX, MOUTH_CY + 1, rx - 3, ry - 2, false);
+    fillEllipse(mcx, mcy, rx, ry);
+    if (step >= 3) fillEllipse(mcx, mcy + 1, rx - 3, ry - 2, false);
     return;
   }
 
@@ -440,44 +554,60 @@ static void drawMouth(uint8_t step) {
     case FACE_SPEAKING:                           // ω — double cat-smile curves
       for (int s2 = 0; s2 < 2; s2++)
         for (int dx = -4; dx <= 4; dx++) {
-          int y = MOUTH_CY - (16 - dx * dx) / 8;
-          int x = MOUTH_CX - 5 + s2 * 10 + dx;
+          int y = mcy - (16 - dx * dx) / 8;
+          int x = mcx - 5 + s2 * 10 + dx;
           px(x, y, true); px(x, y + 1, true);
         }
       break;
 
+    case FACE_CUDDLE:                             // Sweet little '3' cat smile
+      for (int s2 = 0; s2 < 2; s2++)
+        for (int dx = -3; dx <= 3; dx++) {
+          int y = mcy - (9 - dx * dx) / 5;
+          int x = mcx - 3 + s2 * 6 + dx;
+          px(x, y, true); px(x, y + 1, true);
+        }
+      break;
+
+    case FACE_ANGRY:                              // Jagged angry mouth
+      for (int i = -8; i < 8; i += 4) {
+        line(mcx + i, mcy + 2, mcx + i + 2, mcy - 2);
+        line(mcx + i + 2, mcy - 2, mcx + i + 4, mcy + 2);
+      }
+      break;
+
     case FACE_LISTENING:                          // Small round 'O' mouth
-      fillCircle(MOUTH_CX, MOUTH_CY, 4);
-      fillCircle(MOUTH_CX, MOUTH_CY, 2, false);
+      fillCircle(mcx, mcy, 4);
+      fillCircle(mcx, mcy, 2, false);
       break;
 
     case FACE_THINKING:                           // Small flat mouth
-      fillRect(MOUTH_CX - 5, MOUTH_CY - 2, 11, 5);
+      fillRect(mcx - 5, mcy - 2, 11, 5);
       break;
 
     case FACE_WAITING:                            // Inverted curve — sad mouth
       for (int dx = -7; dx <= 7; dx++) {
-        int y = MOUTH_CY + (49 - dx * dx) / 18;
-        px(MOUTH_CX + dx, y, true); px(MOUTH_CX + dx, y + 1, true);
+        int y = mcy + (49 - dx * dx) / 18;
+        px(mcx + dx, y, true); px(mcx + dx, y + 1, true);
       }
       break;
 
     case FACE_ERROR:
-      fillRect(MOUTH_CX - 6, MOUTH_CY - 3, 13, 7);
-      fillRect(MOUTH_CX - 4, MOUTH_CY - 1, 9, 3, false);
+      fillRect(mcx - 6, mcy - 3, 13, 7);
+      fillRect(mcx - 4, mcy - 1, 9, 3, false);
       break;
 
     default:                                      // Sweet resting smile
       for (int dx = -11; dx <= 11; dx++) {
-        int y = MOUTH_CY + 4 - (121 - dx * dx) / 22;
-        px(MOUTH_CX + dx, y, true); px(MOUTH_CX + dx, y + 1, true);
+        int y = mcy + 4 - (121 - dx * dx) / 22;
+        px(mcx + dx, y, true); px(mcx + dx, y + 1, true);
       }
-      // Subtle corner dimples — accentuates kawaii smile
-      px(MOUTH_CX - 13, MOUTH_CY - 2, true); px(MOUTH_CX - 13, MOUTH_CY - 1, true);
-      px(MOUTH_CX + 13, MOUTH_CY - 2, true); px(MOUTH_CX + 13, MOUTH_CY - 1, true);
+      px(mcx - 13, mcy - 2, true); px(mcx - 13, mcy - 1, true);
+      px(mcx + 13, mcy - 2, true); px(mcx + 13, mcy - 1, true);
       break;
   }
 }
+
 
 // ── Status Message (Bengali Bitmap) — top of screen ──
 static void drawBottomText() {
@@ -576,54 +706,71 @@ static void drawWeatherScreen() {
 }
 
 static void drawPomoScreen() {
-  // ⚠️ Displays elapsed time — omits redundant text to prevent broken conjuncts.
-  //    During breaks, the "Break" label appears at top to clarify phase.
-  //
-  if (gPomo.brk)
+  // If in Break or Long Break phase (phase 2 or 3)
+  if (gPomoExt.phase == 2 || gPomoExt.phase == 3 || gPomo.brk) {
     drawBmp((W - BN_BIROTI_W) / 2, 0, BN_BIROTI, BN_BIROTI_W, BN_BIROTI_H);
+  } else {
+    // Show preset badge on top-left: e.g. "25-5" or "50-10"
+    drawText(6, 2, gPomoExt.label);
+    // Show round count on top-right: e.g. "R1"
+    char rBuf[8];
+    snprintf(rBuf, sizeof(rBuf), "R%d", gPomoExt.rounds);
+    drawText(W - 22, 2, rBuf);
+  }
 
-  // ⚠️ Vertical layout budget (fitted into 64 pixels):
-  //
-  //      y  0..13  "Break" label (only during break)
-  //      y 16..29  Time — large numerals
-  //      y 34..39  Progress bar
-  //      y 46..59  "Running" / "Hold to Start" status
+  // Large countdown numerals
   char t[12];
-  int pm = gPomo.secLeft / 60, ps = gPomo.secLeft % 60;
+  int pm = gPomoExt.secLeft / 60, ps = gPomoExt.secLeft % 60;
   if (pm > 99) pm = 99;
   if (pm < 0) { pm = 0; ps = 0; }
   snprintf(t, sizeof(t), "%02d:%02d", pm, ps);
   bnBigCentered(13, t);
 
   // Progress bar
-  int total = gPomo.brk ? 5 * 60 : 25 * 60;
-  int w = (W - 24) * (total - gPomo.secLeft) / (total ? total : 1);
+  int total = gPomoExt.totalSec > 0 ? gPomoExt.totalSec : (gPomo.brk ? 5 * 60 : 25 * 60);
+  int left  = gPomoExt.secLeft;
+  int w = (W - 24) * (total - left) / total;
   if (w < 0) w = 0;
   if (w > W - 24) w = W - 24;
   fillRect(12, 37, W - 24, 1);
   fillRect(12, 34, w, 6);
 
-  if (gPomo.run)
+  if (gPomoExt.run || gPomo.run)
     drawBmp((W - BN_CHOLCHHE_W) / 2, 45, BN_CHOLCHHE, BN_CHOLCHHE_W, BN_CHOLCHHE_H);
   else
     drawBmp((W - BN_CHEPE_W) / 2, 45, BN_CHEPE, BN_CHEPE_W, BN_CHEPE_H);
 }
 
+static void drawStopwatchScreen() {
+  drawBmp((W - BN_TIMER_W) / 2, 0, BN_TIMER, BN_TIMER_W, BN_TIMER_H);
+
+  // Format MM:SS
+  char t[12];
+  int mm = (gSw.ms / 60000);
+  int ss = (gSw.ms % 60000) / 1000;
+  int cs = (gSw.ms % 1000) / 10;
+  if (mm > 99) mm = 99;
+  snprintf(t, sizeof(t), "%02d:%02d", mm, ss);
+  bnBigCentered(14, t);
+
+  // Centiseconds
+  char csBuf[8];
+  snprintf(csBuf, sizeof(csBuf), ".%02d", cs);
+  bnNumCentered(34, csBuf);
+
+  if (gSw.run)
+    drawBmp((W - BN_CHOLCHHE_W) / 2, 46, BN_CHOLCHHE, BN_CHOLCHHE_W, BN_CHOLCHHE_H);
+  else
+    drawBmp((W - BN_THAMANO_W) / 2, 46, BN_THAMANO, BN_THAMANO_W, BN_THAMANO_H);
+}
+
 // ───────────────────── Custom Timer Screen ─────────────────────
 // Layout mirrors Pomodoro for visual consistency. Differentiated by top header
 // ("Timer") and bottom status line indicating current mode.
-//
-// ⚠️ Vertical layout budget (fitted into 64 pixels):
-//      y  2..14  "Timer" header
-//      y 18..31  Time — large numerals
-//      y 34..39  Progress bar
-//      y 46..59  Bottom status line
-//    Spacing rows intentionally left blank for visual balance.
 static void drawTimerScreen() {
   drawBmp((W - BN_TIMER_W) / 2, 0, BN_TIMER, BN_TIMER_W, BN_TIMER_H);
 
   // ── Center Digits ──
-  // In setting mode displays "N Min", otherwise displays "MM:SS"
   if (gTmr.mode == TM_SET) {
     char m[8];
     snprintf(m, sizeof(m), "%d", gTmr.setMin);
@@ -632,8 +779,6 @@ static void drawTimerScreen() {
     bnBig(mx, 15, m);
     drawBmp(mx + mw + 4, 18, BN_MINIT, BN_MINIT_W, BN_MINIT_H);
   } else if (gTmr.mode != TM_DONE || gTmr.blink) {
-    // In TM_DONE mode, toggling blink suppresses drawing numerals on alternate frames,
-    // producing a flashing alert effect without extra timers.
     char t[12];
     int mm = gTmr.secLeft / 60, ss = gTmr.secLeft % 60;
     if (mm > 99) mm = 99;
@@ -677,28 +822,29 @@ static void drawTimerScreen() {
 }
 
 // ⭐ Is the face currently visible on screen?
-// Determines whether animated ticks (blinks, thinking dots) should render.
-// Prevents face animations from unexpectedly interrupting clock
-// or pomodoro screens.
 static bool showingFace() {
   if (gState == FACE_LISTENING || gState == FACE_THINKING ||
-      gState == FACE_SPEAKING) return true;          // Active interaction — display face
-  if (gState == FACE_IDLE)      return gScreen == SCR_FACE;
-  return gState == FACE_WAITING;                     // Waiting screen also shows face
+      gState == FACE_SPEAKING) return true;
+  if (gState == FACE_IDLE || gState == FACE_HAPPY || gState == FACE_CUDDLE ||
+      gState == FACE_ANGRY || gState == FACE_DIZZY || gState == FACE_SLEEPY ||
+      gState == FACE_ECSTATIC) return gScreen == SCR_FACE;
+  return gState == FACE_WAITING;
 }
 
 // ───────────────────────── Full Screen Redraw ─────────────────────────
 static void redrawAll() {
   memset(fb, 0, sizeof(fb));
 
-  if (!showingFace() && gState == FACE_IDLE) {
-    if (gScreen == SCR_CLOCK)        drawClockScreen();
-    else if (gScreen == SCR_WEATHER) drawWeatherScreen();
-    else if (gScreen == SCR_TIMER)   drawTimerScreen();
-    else                             drawPomoScreen();
+  if (!showingFace() && (gState == FACE_IDLE || gState == FACE_HAPPY || gState == FACE_NEUTRAL)) {
+    if (gScreen == SCR_CLOCK)             drawClockScreen();
+    else if (gScreen == SCR_WEATHER)      drawWeatherScreen();
+    else if (gScreen == SCR_TIMER)        drawTimerScreen();
+    else if (gScreen == SCR_STOPWATCH)    drawStopwatchScreen();
+    else                                  drawPomoScreen();
     pushAll();
     return;
   }
+
 
   switch (gState) {
     case FACE_BOOT:

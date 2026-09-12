@@ -23,12 +23,21 @@
 enum FaceState {
   FACE_BOOT,        // Booting up
   FACE_PORTAL,      // Configuration hotspot portal active
-  FACE_IDLE,        // Awaiting user interaction
+  FACE_IDLE,        // Awaiting user interaction / neutral
   FACE_LISTENING,   // Recording / listening to user speech
   FACE_THINKING,    // Gemini is generating response
   FACE_SPEAKING,    // Playing back spoken response
   FACE_WAITING,     // Waiting (quota limit / network retry)
-  FACE_ERROR
+  FACE_ERROR,
+
+  // Kawaii Pet & Emotion States
+  FACE_NEUTRAL,     // Content baseline
+  FACE_HAPPY,       // Sweet smile + blush
+  FACE_CUDDLE,      // Heart eyes + purring blush
+  FACE_ANGRY,       // Furious / rapid tap reaction (X or jagged eyes)
+  FACE_DIZZY,       // Shaken / spiral eyes
+  FACE_SLEEPY,      // Flipped upside down or tired
+  FACE_ECSTATIC     // Big sparkle eyes
 };
 
 // Safe to call even if OLED is disconnected — begin() returns false,
@@ -45,14 +54,24 @@ void faceSetState(FaceState s);
 FaceState faceGetState();
 
 // ───────────────────── Screens ─────────────────────
-// Touch-2 cycles through display screens. While listening/thinking/speaking,
-// the face animation takes precedence and screen selection is queued.
-enum FaceScreen { SCR_FACE, SCR_CLOCK, SCR_WEATHER, SCR_POMO, SCR_TIMER, SCR_COUNT };
+enum FaceScreen {
+  SCR_FACE,
+  SCR_CLOCK,
+  SCR_WEATHER,
+  SCR_POMO,
+  SCR_TIMER,
+  SCR_STOPWATCH,
+  SCR_COUNT
+};
 
 void       faceSetScreen(FaceScreen s);
 FaceScreen faceScreen();
 void       faceNextScreen();
 void       faceRedraw();
+
+// Squish physics: set pixel displacement from IMU tilt
+void       faceSetSquish(int offX, int offY);
+
 
 // ── Screen Data Providers ──
 void faceClockData(int h24, int mi, int se, int day, int mon, int year,
@@ -60,6 +79,9 @@ void faceClockData(int h24, int mi, int se, int day, int mon, int year,
 // Weather — provide condition as WMO code; face.cpp selects the bitmap
 void faceWeatherData(bool valid, float tempC, int hum, int wmoCode, float windKmh);
 void facePomoData(int secLeft, bool running, bool isBreak, int roundsDone);
+void facePomoDataExt(int secLeft, int totalSec, bool running, int phase, int round, const char* presetLabel);
+void faceStopwatchData(uint32_t elapsedMs, bool running);
+
 
 // ───────────────────── Timer ─────────────────────
 // Pomodoro is fixed at 25/5 min; the custom timer is adjustable —

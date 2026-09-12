@@ -35,6 +35,13 @@
 #include "touch.h"
 #include "rtcclock.h"
 #include "weather.h"
+#include "imu.h"
+#include "dfvoice.h"
+#include "pomodoro_engine.h"
+#include "stopwatch.h"
+#include "mood.h"
+#include "modes.h"
+
 
 // ───────────────────── Configuration ─────────────────────
 #define AP_NAME    "StudyMochi-Direct"
@@ -708,9 +715,23 @@ void setup() {
   Serial.printf("[oled] %s\n", oled ? "OK (SDA 21, SCL 22)"
                                      : "pai ni — OLED chhara-i cholbe");
 
-  tTalk.begin(TOUCH_TALK);
-  tMenu.begin(TOUCH_MENU);
+  tTalk.begin(TOUCH_TALK, 1500);
+  tMenu.begin(TOUCH_MENU, 2000);
   clockBegin();
+
+  // MPU6050 (0x69 with AD0 pulled HIGH)
+  bool imuOk = imuBegin(MPU6050_ADDR);
+  Serial.printf("[imu] MPU6050 (0x%02X): %s\n", MPU6050_ADDR, imuOk ? "OK" : "Pai ni");
+
+  // DFPlayer Mini Bangla Voice (HardwareSerial2: RX=16, TX=17, Vol=24)
+  dfvoiceBegin(16, 17, 24);
+  Serial.println("[dfplayer] Serial2 chalu (RX=16, TX=17)");
+
+  gPomodoro.begin();
+  gStopwatch.begin();
+  gMood.begin();
+  gModes.begin();
+
 
   pinMode(BTN_PIN, INPUT_PULLUP);
   pinMode(RESET_PIN, INPUT_PULLUP);      // Safe if unpopulated (floats HIGH)
@@ -1356,10 +1377,35 @@ void loop() {
   uint32_t now = millis();
   tTalk.update(now);
   tMenu.update(now);
-  handleMenuTouch(now);
-  pomoTick(now);
+
+  imuUpdate(now);
+  gMood.tick(now);
+  gPomodoro.tick(now);
+  gStopwatch.tick(now);
   tmrTick(now);
   clockTick(now);
+  gModes.update(now, tTalk, tMenu);
+
+  // Sync Pomodoro data to face renderer
+  facePomoDataExt(gPomodoro.remainingSec(), gPomodoro.totalSec(), gPomodoro.isRunning(),
+                  (int)gPomodoro.phase(), gPomodoro.currentRound(),
+                  gPomodoro.currentProfile().label);
+
+  // Sync Stopwatch data to face renderer
+  faceStopwatchData(gStopwatch.elapsedMs(), gStopwatch.isRunning());
+
+  // Check for Pomodoro phase transitions
+  PomoPhase newPomoPhase;
+  if (gPomodoro.tookPhaseChange(newPomoPhase)) {
+    if (newPomoPhase == POMO_PHASE_WORK) {
+      dfvoicePlay(VOICE_POMO_START);
+      faceRedraw();
+    } else if (newPomoPhase == POMO_PHASE_BREAK || newPomoPhase == POMO_PHASE_LONG_BREAK) {
+      dfvoicePlay(VOICE_POMO_BREAK);
+      gMood.triggerEvent(MOOD_EVT_POMO_COMPLETE);
+      faceRedraw();
+    }
+  }
 
   checkSerialCmd();
   checkResetButton();
@@ -1394,9 +1440,6 @@ void loop() {
   if (!ws.connected()) return;          // Connection may have been severed by pumpWs
 
   // Check for response latency timeout
-  // ⚠️ 30 seconds timeout: Complex queries can take 15-20s for Gemini Live
-  //    to synthesize. Avoid false timeouts during legitimate processing.
-  //
   if (gWaitSince && millis() - gWaitSince > 30000) {
     gWaitSince = 0;
     Serial.println("[api] 30s dhore kono uttor elo na.");
@@ -1411,7 +1454,9 @@ void loop() {
     if (sendTextTurn(gSpeakWhat)) gWaitSince = millis();
   }
 
-  bool down = btnDown() || tTalk.isDown();
+  // Talk button: BOOT button always talks; top touch talks in AI mode
+  bool down = btnDown() || (gModes.isAiMode() && tTalk.isDown());
+
 
   // ── Talk Button Pressed ──
   if (down && !gTalking && gReady) {
