@@ -47,14 +47,21 @@ All peripherals connect directly to the ESP32:
 | **INMP441 I2S Mic** | SCK / WS / SD | **SCK=33, WS=25, SD=32** | VDD ➔ 3.3V, GND ➔ GND, L/R ➔ GND |
 | **MAX98357A I2S Amp** | BCLK / LRC / DIN | **BCLK=26, LRC=27, DIN=14** | VIN ➔ 5V, GAIN ➔ GND, SD ➔ VIN |
 | **OLED (SH1106 1.3")** | SDA / SCL | **SDA=21, SCL=22** | I2C Address `0x3C` |
-| **DS3231 RTC Module** | SDA / SCL | **SDA=21, SCL=22** | I2C Address `0x68` (battery backed) |
+| **DS3231 RTC Module** | SDA / SCL | **SDA=21, SCL=22** | I2C Address `0x68` (Optional: firmware automatically falls back to ESP32 internal RTC & WiFi NTP) |
 | **MPU6050 6-Axis IMU** | SDA / SCL / **AD0** | **SDA=21, SCL=22, AD0 ➔ 3.3V** | **Address `0x69`** (AD0 HIGH avoids conflict with RTC) |
 | **DFPlayer Mini Voice** | TX / RX | **RX2=16, TX2=17** | ESP32 GPIO 16 ◄── DFPlayer TX<br/>ESP32 GPIO 17 ──► 1kΩ ──► DFPlayer RX<br/>VCC ➔ 5V, GND ➔ GND |
-| **TTP223 Top Touch** | SIG (OUT) | **GPIO 18** | Head touch: Cuddle / Angry tap / Context action |
-| **TTP223 Side Touch** | SIG (OUT) | **GPIO 19** | Menu touch: 2s hold = Main Mode, Tap = Sub-Mode |
+| **TTP223 Side Touch** | SIG (OUT) | **GPIO 18** | Normal Touch: 2s hold = Main Mode, Tap = Sub-Mode (Dedicated Mode Switch) |
+| **TTP223 Top Touch** | SIG (OUT) | **GPIO 19** | Head Touch: Voice input in AI mode / Pet Cuddle & Tap in Clock Mode |
 | **BOOT Button** | On-board | **GPIO 0** | Universal talk backup |
 | **Status LED** | On-board | **GPIO 2** | WiFi / activity indicator |
 | **Factory Reset Button** | External/Push | **GPIO 4** | Hold 3 seconds to clear WiFi & API key |
+
+> [!IMPORTANT]
+> **Dual RTC & Automatic WiFi Clock Synchronization:**
+> - Whenever StudyMochi connects or reconnects to WiFi, it automatically queries high-precision NTP servers (`pool.ntp.org`, `time.google.com`, `time.cloudflare.com`) and updates the clock.
+> - If a hardware **DS3231 RTC** is connected, the synced NTP time is automatically written to the DS3231 so time is preserved even when powered off.
+> - If no DS3231 is connected, StudyMochi seamlessly runs on the ESP32's internal hardware RTC synchronized via WiFi NTP.
+> - Type `c` in the Serial Monitor (115200 baud) at any time to force an immediate NTP re-sync and view time status.
 
 > [!IMPORTANT]
 > **MPU6050 AD0 Pin:** Make sure the **AD0 pin** on the MPU6050 breakout is connected to **3.3V (VCC)**. This configures the MPU6050 to I2C address `0x69`, preventing any address collision with the DS3231 RTC (`0x68`).

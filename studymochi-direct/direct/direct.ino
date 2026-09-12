@@ -854,17 +854,12 @@ void setup() {
 
   Serial.print("[wifi] OK, IP "); Serial.println(WiFi.localIP());
 
-  // WiFi connected — sync RTC from NTP (Bangladesh UTC+6).
-  // Fallback to compile timestamp if NTP is unreachable.
-  if (clockOk()) {
-    if (!clockSyncNTP(6 * 3600)) {
-      MochiTime t = clockNow();
-      if (!t.valid) clockSetFromBuild();
-    }
-    MochiTime t = clockNow();
-    Serial.printf("[rtc] ekhon %02d:%02d:%02d  %02d/%02d/%04d\n",
-                  t.hour24, t.minute, t.second, t.day, t.month, t.year);
-  }
+  // WiFi connected — sync time from NTP (Bangladesh UTC+6).
+  Serial.println("[wifi] WiFi OK — NTP theke somoy anchhi...");
+  clockSyncNTP(6 * 3600);
+  MochiTime t = clockNow();
+  Serial.printf("[rtc] ekhon %02d:%02d:%02d  %02d/%02d/%04d (valid=%d)\n",
+                t.hour24, t.minute, t.second, t.day, t.month, t.year, t.valid);
   weatherFetch(gLat, gLon);        // Initial weather fetch
   if (strlen(gApiKey) < 10) {
     Serial.println("\n[api] EKHONO API KEY NEI.");
@@ -925,6 +920,7 @@ static void showHelp() {
   Serial.println("   t <proshno> : mic chhara likhe proshno korun");
   Serial.println("                 (mukhe uttor ele API+speaker thik)");
   Serial.println("   g <number>  : mic gain hate bodlan (g = ekhonkar man)");
+  Serial.println("   c + ENTER : NTP theke notun kore somoy sync koro");
   Serial.println("   p + ENTER : portal kholo (WiFi/key bodlao)");
   Serial.println("   r + ENTER : SOB MUCHE dao (WiFi + API key)");
   Serial.println("   k + ENTER : timer muchhe dao");
@@ -969,6 +965,19 @@ static void checkSerialCmd() {
     tVoice.begin(gTouchVoicePin,   1500);
     Serial.printf("[touch] SWAPPED! Normal (Mode): GPIO %d | Other (Voice/Pet): GPIO %d\n",
                   gTouchNormalPin, gTouchVoicePin);
+    return;
+  }
+
+  if (c == 'c' || c == 'C') {
+    Serial.println("[cmd] NTP theke notun kore somoy anchhi...");
+    clockSyncNTP(6 * 3600);
+    MochiTime t = clockNow();
+    Serial.printf("[rtc] ekhonkar somoy: %02d:%02d:%02d  %02d/%02d/%04d\n",
+                  t.hour24, t.minute, t.second, t.day, t.month, t.year);
+    if (faceScreen() == SCR_CLOCK) {
+      faceClockData(t.hour24, t.minute, t.second, t.day, t.month, t.year, t.dow, t.valid);
+      faceRedraw();
+    }
     return;
   }
 
@@ -1336,12 +1345,11 @@ static void tmrTap(uint32_t now) {
 // Redraw clock screen once per second
 static void clockTick(uint32_t now) {
   if (faceScreen() != SCR_CLOCK) return;
-  if (faceGetState() != FACE_IDLE) return;      // Suppress if Mochi is actively interacting
   if (now - gClockTick < 1000) return;
   gClockTick = now;
   MochiTime t = clockNow();
   faceClockData(t.hour24, t.minute, t.second, t.day, t.month, t.year,
-                t.dow, clockOk() && t.valid);
+                t.dow, t.valid);
   faceRedraw();
 }
 
@@ -1349,6 +1357,20 @@ void loop() {
   uint32_t now = millis();
   tNormal.update(now);
   tVoice.update(now);
+
+  // ── Automatic NTP Sync whenever WiFi connects or reconnects ──
+  static bool sWasWifiConnected = false;
+  static uint32_t sLastNtpSync = 0;
+  bool isWifiConnected = WiFi.isConnected();
+  if (isWifiConnected) {
+    if (!sWasWifiConnected) {
+      Serial.println("[wifi] WiFi connect holo — NTP theke notun somoy anchhi...");
+      if (clockSyncNTP(6 * 3600)) sLastNtpSync = now;
+    } else if (now - sLastNtpSync >= 3600000) { // re-sync every 1 hour
+      if (clockSyncNTP(6 * 3600)) sLastNtpSync = now;
+    }
+  }
+  sWasWifiConnected = isWifiConnected;
 
   imuUpdate(now);
   gMood.tick(now);

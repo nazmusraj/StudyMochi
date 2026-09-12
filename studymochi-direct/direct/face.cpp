@@ -835,7 +835,7 @@ static bool showingFace() {
 static void redrawAll() {
   memset(fb, 0, sizeof(fb));
 
-  if (!showingFace() && (gState == FACE_IDLE || gState == FACE_HAPPY || gState == FACE_NEUTRAL)) {
+  if (!showingFace()) {
     if (gScreen == SCR_CLOCK)             drawClockScreen();
     else if (gScreen == SCR_WEATHER)      drawWeatherScreen();
     else if (gScreen == SCR_TIMER)        drawTimerScreen();
