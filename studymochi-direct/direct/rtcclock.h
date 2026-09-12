@@ -9,7 +9,7 @@
 //     1) Via NTP when WiFi is connected — highly accurate, automatic
 //     2) Fallback to firmware compilation time when NTP is unavailable
 //
-//   Requires RTClib library (Adafruit).
+//   Uses native Wire I2C driver (no external RTClib dependency required).
 // ════════════════════════════════════════════════════════════════
 #pragma once
 #include <Arduino.h>
