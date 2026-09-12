@@ -88,17 +88,20 @@ StudyMochi uses two capacitive touch sensors:
 
 ```
                   ┌────────────────────────┐
-                  │    TOP TOUCH (GPIO 18) │  <-- Head: Pet, Cuddle, Action
+                  │   HEAD TOUCH (GPIO 19) │  <-- Other Touch: Pet, Cuddle, Voice Input in AI Mode
                   └────────────────────────┘
                   ┌────────────────────────┐
                   │                        │
-                  │       OLED SCREEN      │  [SIDE TOUCH] (GPIO 19)
-                  │       (128 x 64)       │  <-- 2s hold = Main Mode
-                  │                        │      Short tap = Sub-Mode
+                  │       OLED SCREEN      │  [SIDE TOUCH] (GPIO 18)
+                  │       (128 x 64)       │  <-- Normal Touch: 2s hold = Main Mode
+                  │                        │      Short tap = Sub-Mode (Exits AI mode)
                   └────────────────────────┘
 ```
 
-### 1. Side Touch Sensor (GPIO 19)
+> [!TIP]
+> **Reversed pins?** If your breadboard or enclosure has the sensors wired to the opposite pins, you don't need to resolder! Simply open the Serial Monitor (115200 baud) and type `w` followed by `ENTER`. StudyMochi will swap the pin assignments (`18 <-> 19`) and persist your preference in ESP32 NVS flash memory.
+
+### 1. Side Touch Sensor (GPIO 18 — Normal Touch / Mode Navigation)
 - **Long Press (≥ 2.0s):** Cycles the **Main Modes**:
   1. `MODE_CLOCK` (Clock / Weather / Pet)
   2. `MODE_TIMER` (Pomodoro / Custom Timer / Stopwatch)
@@ -106,8 +109,14 @@ StudyMochi uses two capacitive touch sensors:
 - **Short Tap:** Cycles **Sub-Modes** within the active mode:
   - In `MODE_CLOCK`: Sub 1 (Clock, Date, Day) ↔ Sub 2 (Live Weather)
   - In `MODE_TIMER`: Sub 1 (Pomodoro) ➔ Sub 2 (Custom Timer) ➔ Sub 3 (Stopwatch)
+  - In `MODE_AI`: **Immediately exits AI mode back to Clock mode!**
+- **Interruption Guard:** If touched while Gemini voice recording or playback is active, it immediately aborts speech and smoothly advances the mode.
+- **Strict Isolation:** This sensor **never** triggers voice input under any circumstance.
 
-### 2. Top Touch Sensor (GPIO 18 — Head)
+### 2. Top / Head Touch Sensor (GPIO 19 — Other Touch / Pet & Voice)
+- **In AI Mode (`MODE_AI`):**
+  - **Press and Hold:** Speaks to Gemini Live API over WebSocket (LED turns ON, listening animation).
+  - **Release:** Automatically sends turn to Gemini Live; plays the Bengali/English spoken response through the speaker with mouth lip-sync animation.
 - **In Clock Mode (Pet Interaction):**
   - **Single Soft Tap:** Happy pet smile (`+10` mood).
   - **Hold (≥ 2.0s):** Cuddle response! Heart eyes (`♥_♥`) and Bangla loving voice (`+25` mood).
@@ -122,8 +131,6 @@ StudyMochi uses two capacitive touch sensors:
   - **Stopwatch Screen:**
     - Tap: Start / Pause stopwatch.
     - Hold (2s): Reset stopwatch to `00:00.00`.
-- **In AI Mode:**
-  - Hold / Tap: Talks with Gemini Live.
 
 ---
 

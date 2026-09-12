@@ -64,14 +64,23 @@
 // ───── Touch Sensors (TTP223 x 2) ─────
 // 3 wires per sensor: VCC->3V3 GND->GND OUT->GPIO specified below
 //
-//   Touch-1 (GPIO 18) : Hold to talk — functions identically to BOOT button
-//   Touch-2 (GPIO 19) : Long press switches screens, single tap triggers screen action
-//                     Face -> Clock -> Weather -> Pomodoro -> Timer
-//                     Long press switches screen; tap executes current screen action
+//   Touch Normal (GPIO 18) : "Normal touch" dedicated to MODE NAVIGATION (Side sensor)
+//                            - Long press (2s): Cycles main mode (Clock -> Timer -> AI -> Clock).
+//                            - Single tap: Cycles sub-mode (Clock/Weather, Pomo/Timer/Stopwatch).
+//                            - In AI mode: Tap OR 2s hold exits back to Clock mode.
+//                            - NEVER triggers voice input.
+//
+//   Touch Voice (GPIO 19)  : "Other touch" dedicated to VOICE INPUT & PET (Head sensor)
+//                            - In AI Mode: Hold to speak to Gemini Live API; release to listen.
+//                            - In Clock Mode: Tap = pat (happy), Hold = cuddle, 3-tap = angry.
+//                            - In Timer Mode: Tap = toggle start/pause, Hold = change profile / reset.
 //
 // If module is active LOW, configure TOUCH_ACTIVE_LOW 1 in touch.h.
-#define TOUCH_TALK 18
-#define TOUCH_MENU 19
+#define TOUCH_NORMAL_PIN 18
+#define TOUCH_VOICE_PIN  19
+
+static int   gTouchNormalPin = TOUCH_NORMAL_PIN;
+static int   gTouchVoicePin  = TOUCH_VOICE_PIN;
 
 // ───── Pomodoro ─────
 // ───── Timer ─────
@@ -157,7 +166,7 @@ static int32_t  gGain   = MIC_GAIN;   // Current gain setting (persisted in NVS)
 static int32_t  gGainStart = MIC_GAIN; // Initial gain setting when this turn started
 
 // ───── Touch, Clock, Weather, Pomodoro ─────
-static Touch    tTalk, tMenu;
+static Touch    tNormal, tVoice;
 static float    gLat = WX_LAT_DEFAULT, gLon = WX_LON_DEFAULT;
 static uint32_t gClockTick = 0;         // Refresh screen once per second
 static bool     gPomoRun = false, gPomoBreak = false;
@@ -715,8 +724,16 @@ void setup() {
   Serial.printf("[oled] %s\n", oled ? "OK (SDA 21, SCL 22)"
                                      : "pai ni — OLED chhara-i cholbe");
 
-  tTalk.begin(TOUCH_TALK, 1500);
-  tMenu.begin(TOUCH_MENU, 2000);
+  // ── Touch Sensor Configuration ──
+  prefs.begin("mochidirect", true);
+  gTouchNormalPin = prefs.getInt("pin_norm", TOUCH_NORMAL_PIN);
+  gTouchVoicePin  = prefs.getInt("pin_voic", TOUCH_VOICE_PIN);
+  prefs.end();
+
+  tNormal.begin(gTouchNormalPin, 2000);  // Normal touch: 2.0s hold for mode change
+  tVoice.begin(gTouchVoicePin,   1500);  // Other touch: Voice input in AI mode / Pet interaction
+  Serial.printf("[touch] Normal (Mode): GPIO %d | Other (Voice/Pet): GPIO %d\n",
+                gTouchNormalPin, gTouchVoicePin);
   clockBegin();
 
   // MPU6050 (0x69 with AD0 pulled HIGH)
@@ -896,16 +913,13 @@ static void factoryReset(const char *why) {
 static void showHelp() {
   Serial.println("\n  ── Serial command ──");
   Serial.println("   o + ENTER   : OLED SH1106 <-> SSD1306 bodlao");
+  Serial.println("   w + ENTER   : Touch sensor pin swap (Normal <-> Voice)");
   Serial.println("  ── touch ──");
-  Serial.printf ("   GPIO %d chepe dhorun : kotha bolun\n", TOUCH_TALK);
-  Serial.printf ("   GPIO %d CHEPE DHORLE : porda bodlay\n", TOUCH_MENU);
-  Serial.println("     mukh > ghori > abohawa > pomodoro > timer");
-  Serial.printf ("   GPIO %d EK CHAP     : oi porda-r kaj\n", TOUCH_MENU);
-  Serial.println("     pomodoro : chalu / bondho");
-  Serial.println("     timer    : 1 chap = bosano shuru, ar chap = +5 min");
-  Serial.println("                (60-er por 0 = bad). 3s chup thakle chalu.");
-  Serial.println("                chole thakle: chap = thamao / abar chalu");
-  Serial.println("     abohawa  : notun kore khobor ane");
+  Serial.printf ("   GPIO %d (Normal Touch) : 2s CHEPE DHORLE main mode bodlay\n", gTouchNormalPin);
+  Serial.println("                             1 chap: sub-mode (AI mode-e Clock-e phere)");
+  Serial.printf ("   GPIO %d (Other/Head)   : AI mode-e chepe dhorle kotha bola\n", gTouchVoicePin);
+  Serial.println("                             Clock mode-e আদর / pet interaction");
+  Serial.println("                             Timer mode-e start/pause/profile");
   Serial.println("   s + ENTER   : speaker beep — tar thik achhe ki");
   Serial.println("   v <0-100>   : speaker volume (blurry hole koman)");
   Serial.println("   t <proshno> : mic chhara likhe proshno korun");
@@ -942,6 +956,21 @@ static void checkSerialCmd() {
   char c = line[0];
   const char *rest = line + 1;
   while (*rest == ' ') rest++;
+
+  if (c == 'w' || c == 'W') {
+    int tmp = gTouchNormalPin;
+    gTouchNormalPin = gTouchVoicePin;
+    gTouchVoicePin  = tmp;
+    prefs.begin("mochidirect", false);
+    prefs.putInt("pin_norm", gTouchNormalPin);
+    prefs.putInt("pin_voic", gTouchVoicePin);
+    prefs.end();
+    tNormal.begin(gTouchNormalPin, 2000);
+    tVoice.begin(gTouchVoicePin,   1500);
+    Serial.printf("[touch] SWAPPED! Normal (Mode): GPIO %d | Other (Voice/Pet): GPIO %d\n",
+                  gTouchNormalPin, gTouchVoicePin);
+    return;
+  }
 
   if (c == 'o' || c == 'O') {
     bool now = !faceIsSH1106();
@@ -1303,63 +1332,6 @@ static void tmrTap(uint32_t now) {
   tmrPush();
 }
 
-// ⭐ Touch-2 gesture mapping:
-//    Long press switches screen; single tap triggers screen action.
-//    (Prevents accidental screen switches during interaction).
-static void handleMenuTouch(uint32_t now) {
-  // ── Long Press -> Cycle to Next Screen ──
-  if (tMenu.tookHold()) {
-    faceNextScreen();
-    FaceScreen sc = faceScreen();
-    Serial.printf("[touch] porda: %s\n",
-                  sc == SCR_FACE ? "mukh" : sc == SCR_CLOCK ? "ghori" :
-                  sc == SCR_WEATHER ? "abohawa" :
-                  sc == SCR_POMO ? "pomodoro" : "timer");
-    if (sc == SCR_WEATHER) {
-      // Refresh weather upon entering screen (serves from cache if < 15 min old)
-      if (weatherFetch(gLat, gLon)) {
-        WeatherNow w = weatherGet();
-        faceWeatherData(true, w.tempC, w.humidity, w.code, w.windKmh);
-      }
-    }
-    if (sc == SCR_TIMER) tmrPush();
-    faceRedraw();
-    return;                               // Execute single action per gesture
-  }
-
-  // ── Single Tap -> Screen Specific Action ──
-  if (!tMenu.tookTap()) return;
-
-  switch (faceScreen()) {
-    case SCR_POMO:
-      if (gPomoRun) {
-        gPomoRun = false;
-        Serial.println("[pomo] thamlo");
-        facePomoData(gPomoLeft, gPomoRun, gPomoBreak, gPomoRounds);
-        faceRedraw();
-      } else {
-        pomoStart(gPomoBreak);
-      }
-      break;
-
-    case SCR_TIMER:
-      tmrTap(now);
-      break;
-
-    case SCR_WEATHER:
-      // Force fresh weather fetch bypassing cache
-      Serial.println("[wx] notun kore anchhi");
-      if (weatherFetch(gLat, gLon, true)) {
-        WeatherNow w = weatherGet();
-        faceWeatherData(true, w.tempC, w.humidity, w.code, w.windKmh);
-      }
-      faceRedraw();
-      break;
-
-    default:                              // Face, Clock screens have no tap action
-      break;
-  }
-}
 
 // Redraw clock screen once per second
 static void clockTick(uint32_t now) {
@@ -1375,8 +1347,8 @@ static void clockTick(uint32_t now) {
 
 void loop() {
   uint32_t now = millis();
-  tTalk.update(now);
-  tMenu.update(now);
+  tNormal.update(now);
+  tVoice.update(now);
 
   imuUpdate(now);
   gMood.tick(now);
@@ -1384,7 +1356,7 @@ void loop() {
   gStopwatch.tick(now);
   tmrTick(now);
   clockTick(now);
-  gModes.update(now, tTalk, tMenu);
+  gModes.update(now, tVoice, tNormal);
 
   // Sync Pomodoro data to face renderer
   facePomoDataExt(gPomodoro.remainingSec(), gPomodoro.totalSec(), gPomodoro.isRunning(),
@@ -1454,8 +1426,9 @@ void loop() {
     if (sendTextTurn(gSpeakWhat)) gWaitSince = millis();
   }
 
-  // Talk button: BOOT button always talks; top touch talks in AI mode
-  bool down = btnDown() || (gModes.isAiMode() && tTalk.isDown());
+  // Talk button: BOOT button always talks; other touch sensor (tVoice) talks ONLY in AI mode.
+  // The normal touch sensor (tNormal) is STRICTLY reserved for mode switching and NEVER triggers voice input.
+  bool down = btnDown() || (gModes.isAiMode() && tVoice.isDown());
 
 
   // ── Talk Button Pressed ──
@@ -1479,6 +1452,15 @@ void loop() {
 
   // ── Talk Button Held -> Stream Audio ──
   if (gTalking) {
+    // If user touches normal mode change sensor (tNormal) while talking, abort speech immediately
+    // so mode change is fast, responsive, and never blocked by AI mode!
+    if (tNormal.tookTap() || tNormal.tookHold()) {
+      sendActivity(false);
+      gTalking = false;
+      digitalWrite(LED_PIN, LOW);
+      gModes.nextMainMode();
+      return;
+    }
     size_t got = 0;
     bool lineOk = true;
     if (i2s_read(I2S_MIC, rawBuf, sizeof(rawBuf), &got, I2S_WAIT) == ESP_OK) {

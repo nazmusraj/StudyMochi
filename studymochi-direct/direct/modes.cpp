@@ -29,6 +29,10 @@ void ModeManager::nextSubMode() {
     _subMode = (_subMode + 1) % SUB_CLOCK_COUNT;
   } else if (_mainMode == MODE_TIMER) {
     _subMode = (_subMode + 1) % SUB_TIMER_COUNT;
+  } else if (_mainMode == MODE_AI) {
+    // Single tap on mode change sensor in AI mode exits cleanly back to Clock mode
+    setMainMode(MODE_CLOCK);
+    return;
   }
   applyScreen();
 }
