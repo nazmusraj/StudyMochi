@@ -7,7 +7,6 @@
 #pragma once
 #include <Arduino.h>
 #include "face.h"
-#include "dfvoice.h"
 
 enum MoodEvent {
   MOOD_EVT_PAT,           // Single soft tap (+10)
@@ -29,6 +28,8 @@ public:
   bool isAngry() const { return (_tempReaction == FACE_ANGRY); }
   bool isCuddling() const { return (_tempReaction == FACE_CUDDLE); }
   bool isDizzy() const { return (_tempReaction == FACE_DIZZY); }
+  bool hasTemporaryReaction() const { return _reactionUntil > millis(); }
+  uint32_t reactionUntil() const { return _reactionUntil; }
 
 private:
   int       _score       = 35; // Baseline happy (range -100 to +100)

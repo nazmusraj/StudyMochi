@@ -1,24 +1,7 @@
-// ════════════════════════════════════════════════════════════════
-//   StudyMochi DIRECT — Standalone ESP32 Gemini Live client without a laptop.
-//
-//        ESP32 ──── WiFi ────► Gemini Live API (wss)
-//          ▲                          │
-//          └────── Audio Return ───────┘
-//
-//   ⚠️ This is an independent sketch. Existing studymochi_esp32 code remains untouched —
-//      any changes here will not affect the original firmware.
-//
-//   ▸ Library: WiFiManager (tzapu) — only external dependency required
-//     (WebSocket client is custom-built; see miniws.cpp)
-//
-//   ▸ On first boot, configuration AP launches: StudyMochi-Direct / mochi1234
-//     Enter WiFi credentials and Gemini API key; saved to NVS.
-//
-//   ▸ Pinout wiring — identical to existing board setup:
-//       INMP441 : SCK=33  WS=25  SD=32   VDD→3V3  L/R→GND
-//       MAX98357A: BCLK=26 LRC=27 DIN=14  VIN→5V   GAIN→GND  SD→VIN
-//       Hold BOOT button to talk
-// ════════════════════════════════════════════════════════════════
+// StudyMochi firmware for a Bengali desk companion on a classic ESP32.
+// It combines clock/weather pages, three timer tools, pet interactions,
+// MPU6050 orientation gestures, SD announcements, and Gemini Live audio.
+// The complete pin map and operating instructions are in the root README.
 
 #include <WiFi.h>
 // ⚠️ Wire.h MUST be included here even though it is used in face.cpp.
@@ -36,7 +19,8 @@
 #include "rtcclock.h"
 #include "weather.h"
 #include "imu.h"
-#include "dfvoice.h"
+#include "config.h"
+#include "audio_manager.h"
 #include "pomodoro_engine.h"
 #include "stopwatch.h"
 #include "mood.h"
@@ -44,60 +28,32 @@
 
 
 // ───────────────────── Configuration ─────────────────────
-#define AP_NAME    "StudyMochi-Direct"
-#define AP_PASS    "mochi1234"
-
-#define MIC_SCK    33
-#define MIC_WS     25
-#define MIC_SD     32
-#define AMP_BCLK   26
-#define AMP_LRC    27
-#define AMP_DIN    14
-// ───── OLED ─────
-// Same pins as laptop-connected firmware. Code executes normally even if OLED
-// is disconnected — faceBegin() returns false, and all display routines
-// safely exit as no-ops.
-#define OLED_SDA   21
-#define OLED_SCL   22
-#define OLED_ADDR  0x3C
-
-// ───── Touch Sensors (TTP223 x 2) ─────
-// 3 wires per sensor: VCC->3V3 GND->GND OUT->GPIO specified below
-//
-//   Touch Normal (GPIO 18) : "Normal touch" dedicated to MODE NAVIGATION (Side sensor)
-//                            - Long press (2s): Cycles main mode (Clock -> Timer -> AI -> Clock).
-//                            - Single tap: Cycles sub-mode (Clock/Weather, Pomo/Timer/Stopwatch).
-//                            - In AI mode: Tap OR 2s hold exits back to Clock mode.
-//                            - NEVER triggers voice input.
-//
-//   Touch Voice (GPIO 19)  : "Other touch" dedicated to VOICE INPUT & PET (Head sensor)
-//                            - In AI Mode: Hold to speak to Gemini Live API; release to listen.
-//                            - In Clock Mode: Tap = pat (happy), Hold = cuddle, 3-tap = angry.
-//                            - In Timer Mode: Tap = toggle start/pause, Hold = change profile / reset.
-//
-// If module is active LOW, configure TOUCH_ACTIVE_LOW 1 in touch.h.
-#define TOUCH_NORMAL_PIN 18
-#define TOUCH_VOICE_PIN  19
+#define AP_NAME MOCHI_AP_NAME
+#define AP_PASS MOCHI_AP_PASS
+#define MIC_SCK PIN_MIC_BCLK
+#define MIC_WS PIN_MIC_LRCLK
+#define MIC_SD PIN_MIC_DATA
+#define OLED_SDA PIN_OLED_SDA
+#define OLED_SCL PIN_OLED_SCL
+#define OLED_ADDR OLED_I2C_ADDR
+#define TOUCH_NORMAL_PIN PIN_TOUCH_SIDE
+#define TOUCH_VOICE_PIN PIN_TOUCH_HEAD
 
 static int   gTouchNormalPin = TOUCH_NORMAL_PIN;
 static int   gTouchVoicePin  = TOUCH_VOICE_PIN;
 
-// ───── Pomodoro ─────
 // ───── Timer ─────
 #define TMR_STEP_MIN      5        // Minutes added per tap
 #define TMR_MAX_MIN      60        // Reset threshold (exceeding rolls back to 0)
-#define TMR_SET_WAIT_MS 3000       // Idle timeout before auto-start after setting
-
-#define POMO_WORK_SEC  (25 * 60)
-#define POMO_BREAK_SEC (5 * 60)
+#define TMR_SET_WAIT_MS 3000
 
 // ───── Weather Location (Dhaka default) ─────
 // Configurable via setup portal
-#define WX_LAT_DEFAULT 23.8103f
-#define WX_LON_DEFAULT 90.4125f
+#define WX_LAT_DEFAULT DEFAULT_LATITUDE
+#define WX_LON_DEFAULT DEFAULT_LONGITUDE
 
-#define BTN_PIN    0            // BOOT button — talk trigger (backup)
-#define LED_PIN    2
+#define BTN_PIN PIN_BOOT_BUTTON
+#define LED_PIN PIN_STATUS_LED
 
 // ───── Reset Button ─────
 // One pin to GPIO 4, other pin to GND. Uses internal pull-up resistor;
@@ -105,11 +61,11 @@ static int   gTouchVoicePin  = TOUCH_VOICE_PIN;
 //
 // Holding 3 seconds clears WiFi + API key and reboots into setup portal.
 // Blinking LED signals progress during hold.
-#define RESET_PIN      4
+#define RESET_PIN PIN_FACTORY_RESET
 #define RESET_HOLD_MS  3000
 
-#define MIC_RATE   16000        // Required by Gemini Live API (16 kHz 16-bit mono PCM)
-#define OUT_RATE   24000        // Gemini Live API return sample rate (24 kHz 16-bit mono PCM)
+#define MIC_RATE MIC_SAMPLE_RATE
+#define OUT_RATE SPEAKER_SAMPLE_RATE
 // Calibrated from recorded log measurements:
 // logs/esp32-in-*.wav: At gain 16, RMS was -5.4 dBFS with
 // 22.8% clipped samples. Speech target is RMS ≈ -20 dBFS.
@@ -140,7 +96,6 @@ static int   gTouchVoicePin  = TOUCH_VOICE_PIN;
 #define GEM_VOICE  "Kore"
 
 #define I2S_MIC    I2S_NUM_0
-#define I2S_AMP    I2S_NUM_1
 #define I2S_WAIT   pdMS_TO_TICKS(200)
 
 // ───────────────────── State Variables ─────────────────────
@@ -168,17 +123,11 @@ static int32_t  gGainStart = MIC_GAIN; // Initial gain setting when this turn st
 // ───── Touch, Clock, Weather, Pomodoro ─────
 static Touch    tNormal, tVoice;
 static float    gLat = WX_LAT_DEFAULT, gLon = WX_LON_DEFAULT;
+static long     gStoredUtcOffset = 6 * 3600;
 static uint32_t gClockTick = 0;         // Refresh screen once per second
-static bool     gPomoRun = false, gPomoBreak = false;
-static int      gPomoLeft = POMO_WORK_SEC;
-static int      gPomoRounds = 0;
-static uint32_t gPomoTick = 0;
-static bool     gSpeakOnIdle = false;   // Mochi speaks announcement once idle after pomodoro
-static char     gSpeakWhat[160] = "";
 
 // ───── Timer ─────
-// Pomodoro is fixed at 25/5 minutes. Timer is customizable —
-// duration adjusted by tapping Touch-2 on the timer screen.
+// The normal timer is adjustable in five-minute steps.
 static TimerMode gTmrMode = TM_IDLE;
 static int       gTmrLeft = 0;          // Remaining seconds
 static int       gTmrTotal = 0;         // Initial duration in seconds
@@ -186,8 +135,17 @@ static int       gTmrSetMin = 0;        // Current minutes in setting mode
 static uint32_t  gTmrTick = 0;
 static uint32_t  gTmrBlink = 0;         // Display flash state when timer expires
 static bool      gTmrBlinkOn = true;
-static int       gTmrBeeps = 0;         // Remaining alert beeps
-static uint32_t  gTmrBeepAt = 0;
+static bool      gTmrAlerted = false;
+
+// A pet animation temporarily owns the display, then returns to the exact
+// clock/weather/timer page that was active before the interaction.
+static bool      gPetOverlay = false;
+static uint32_t  gPetOverlayUntil = 0;
+static bool      gAiListening = false;
+static uint32_t  gAiStartAfter = 0;
+static uint32_t  gLastUiRefresh = 0;
+static bool      gFaceDownDnd = false;
+static bool      gPomoResumeSilently = false;
 
 static int32_t rawBuf[256];
 static int16_t pcmBuf[CHUNK_SAMPLES];
@@ -238,7 +196,7 @@ static int16_t micSample(int32_t raw) {
 // Average amplitude over the turn
 static int32_t turnRms() {
   if (!gNSamp) return 0;
-  return (int32_t)sqrt((double)(gSumSq / gNSamp));
+  return (int32_t)sqrt((double)gSumSq / (double)gNSamp);
 }
 
 // ───── Forward Declarations (invoked by setup()) ─────
@@ -247,7 +205,6 @@ static void factoryReset(const char *why);
 static void saveGain();
 static void planRetry(const char *why, uint32_t ms);
 static void turnReport();
-static void beep(int hz, int ms, int amp);
 static void tmrClear();                 // Needed before Serial 'k' handler
 
 // ───── Exponential Reconnect Backoff ─────
@@ -280,67 +237,15 @@ static bool micBegin() {
   return i2s_set_pin(I2S_MIC, &p) == ESP_OK;
 }
 
-static bool ampBegin() {
-  i2s_config_t c = {};
-  c.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
-  c.sample_rate = OUT_RATE;
-  c.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
-  c.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
-  c.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-  c.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  // ⚠️ 16 DMA buffers instead of 8:
-  // Google streams 40 ms audio chunks, but network jitter varies packet arrival.
-  // 8 buffers provide only ~85 ms buffering — a brief packet delay empties DMA,
-  // resulting in audible audio stuttering and glitching.
-  // 16 buffers store ~170 ms, comfortably absorbing network jitter.
-  // Memory cost: 8 KB RAM (ample free memory available).
-  c.dma_buf_count = 16; c.dma_buf_len = 256;
-  c.use_apll = false; c.tx_desc_auto_clear = true;
-  i2s_pin_config_t p; fillPins(p, AMP_BCLK, AMP_LRC, AMP_DIN, I2S_PIN_NO_CHANGE);
-  if (i2s_driver_install(I2S_AMP, &c, 0, NULL) != ESP_OK) return false;
-  if (i2s_set_pin(I2S_AMP, &p) != ESP_OK) return false;
-  i2s_zero_dma_buffer(I2S_AMP);
-  return true;
-}
-
-// ── Playback Volume ──
-// Gemini audio arrives near full digital scale (peak ~32323 / 32767).
-// With GAIN pin tied to GND, MAX98357A adds +12 dB. Small speakers
-// may distort or clip. Attenuate before I2S playback.
-// Adjustable at runtime using the 'v' Serial command.
 static int gVol = 70;                    // 0-100% volume scale
-
-// The playback scaling loop touches every sample, allowing amplitude envelope
-// measurement for lip-sync at zero additional CPU cost.
 static uint8_t gEnv = 0;                 // Amplitude envelope (0..255)
 
-static void applyVol(uint8_t *b, size_t n) {
-  int16_t *s = (int16_t *)b;             // PCM buffer is 4-byte aligned
-  size_t m = n / 2;
-  int32_t peak = 0;
-  for (size_t i = 0; i < m; i++) {
-    int32_t v = s[i];
-    if (gVol < 100) { v = (v * gVol) / 100; s[i] = (int16_t)v; }
-    if (v < 0) v = -v;
-    if (v > peak) peak = v;
-  }
-  // Speech peaks typically occupy ~half dynamic range; scale by 2 for lip-sync sensitivity
-  int32_t e = peak * 2 / 129;            // 32767*2/129 ≈ 508 -> clamp
-  if (e > 255) e = 255;
-  // Fast attack, slow decay filter — prevents erratic mouth jittering
-  gEnv = (e > gEnv) ? (uint8_t)e : (uint8_t)((gEnv * 3 + e) / 4);
-}
-
-static void speakerWrite(const uint8_t *d, size_t n) {
+static void speakerWrite(uint8_t *data, size_t bytes) {
   if (!gAmpOk) return;
-  size_t done = 0;
-  uint32_t t0 = millis();
-  while (done < n) {
-    size_t w = 0;
-    if (i2s_write(I2S_AMP, d + done, n - done, &w, I2S_WAIT) != ESP_OK) break;
-    done += w;
-    if (w == 0 && millis() - t0 > 500) break;   // DMA buffer timeout — avoid hanging
-  }
+  uint8_t instantEnvelope = 0;
+  gAudio.writeAiPcm(data, bytes, (uint8_t)gVol, &instantEnvelope);
+  gEnv = instantEnvelope > gEnv ? instantEnvelope :
+         (uint8_t)((gEnv * 3 + instantEnvelope) / 4);
 }
 
 // ───────────────────── Live API: Transmission ─────────────────────
@@ -424,34 +329,7 @@ static bool sendAudioChunk(const int16_t *pcm, size_t samples) {
 
 // Append brief silence flush — prevents audible DAC pop from lingering DMA samples
 static void speakerSilence() {
-  if (!gAmpOk) return;
-  static const uint8_t z[512] = {0};
-  for (int i = 0; i < 4; i++) speakerWrite(z, sizeof(z));
-}
-
-// Test beep — verifies I2S amplifier and speaker connectivity in 1 second
-static void beep(int hz, int ms, int amp) {
-  if (!gAmpOk) {
-    Serial.println("[i2s] amp chalu nei — beep bajano gelo na");
-    return;
-  }
-  const int total = (OUT_RATE * ms) / 1000;
-  int16_t chunk[256];
-  int done = 0;
-  while (done < total) {
-    int n = (total - done) < 256 ? (total - done) : 256;
-    for (int i = 0; i < n; i++) {
-      float t = (float)(done + i) / OUT_RATE;
-      float env = 1.0f;                       // Smooth envelope fade-in / fade-out
-      if (done + i < 400)           env = (done + i) / 400.0f;
-      if (total - (done + i) < 400) env = (total - (done + i)) / 400.0f;
-      chunk[i] = (int16_t)(amp * env * sinf(2.0f * PI * hz * t));
-    }
-    applyVol((uint8_t *)chunk, n * sizeof(int16_t));
-    speakerWrite((uint8_t *)chunk, n * sizeof(int16_t));
-    done += n;
-  }
-  speakerSilence();
+  gAudio.endAiStream();
 }
 
 // Turn completion summary — printed atomically after playback completes
@@ -507,8 +385,7 @@ static void handleServerFrame(uint64_t len) {
   //
   char head[200]; size_t hn = 0;
 
-  auto flush = [&]() { if (pn) { applyVol(pcm, pn);
-                               speakerWrite(pcm, pn);
+  auto flush = [&]() { if (pn) { speakerWrite(pcm, pn);
                                faceMouth(gEnv);        // ⭐ Lip-sync mouth animation
                                audioBytes += pn; pn = 0; } };
 
@@ -715,7 +592,7 @@ void setup() {
   Serial.printf("[chip] %s, free heap %u KB\n",
                 ESP.getChipModel(), ESP.getFreeHeap() / 1024);
 
-  // panel-er dhoron NVS-e jomano thake; 'o' command diye bodlano jay
+  // The selected OLED controller type is persisted in NVS.
   prefs.begin("mochidirect", true);
   bool sh1106 = prefs.getBool("sh1106", true);
   prefs.end();
@@ -729,20 +606,20 @@ void setup() {
   gTouchNormalPin = prefs.getInt("pin_norm", TOUCH_NORMAL_PIN);
   gTouchVoicePin  = prefs.getInt("pin_voic", TOUCH_VOICE_PIN);
   prefs.end();
-
-  tNormal.begin(gTouchNormalPin, 2000);  // Normal touch: 2.0s hold for mode change
-  tVoice.begin(gTouchVoicePin,   1500);  // Other touch: Voice input in AI mode / Pet interaction
+  // Restore devices that briefly saved GPIO 34 for the head sensor.
+  if (gTouchVoicePin == 34) {
+    gTouchVoicePin = TOUCH_VOICE_PIN;
+    prefs.begin("mochidirect", false);
+    prefs.putInt("pin_voic", gTouchVoicePin);
+    prefs.end();
+  }
+  tNormal.begin(gTouchNormalPin, TOUCH_HOLD_MS);
+  tVoice.begin(gTouchVoicePin, TOUCH_HOLD_MS);
   Serial.printf("[touch] Normal (Mode): GPIO %d | Other (Voice/Pet): GPIO %d\n",
                 gTouchNormalPin, gTouchVoicePin);
-  clockBegin();
-
   // MPU6050 (0x69 with AD0 pulled HIGH)
   bool imuOk = imuBegin(MPU6050_ADDR);
   Serial.printf("[imu] MPU6050 (0x%02X): %s\n", MPU6050_ADDR, imuOk ? "OK" : "Pai ni");
-
-  // DFPlayer Mini Bangla Voice (HardwareSerial2: RX=16, TX=17, Vol=24)
-  dfvoiceBegin(16, 17, 24);
-  Serial.println("[dfplayer] Serial2 chalu (RX=16, TX=17)");
 
   gPomodoro.begin();
   gStopwatch.begin();
@@ -757,9 +634,11 @@ void setup() {
 
   hpR = expf(-2.0f * PI * MIC_HPF_HZ / MIC_RATE);
   gMicOk = micBegin();
-  gAmpOk = ampBegin();
-  Serial.printf("[i2s] mic %s | amp %s\n", gMicOk ? "OK" : "BYARTHO",
-                gAmpOk ? "OK" : "BYARTHO");
+  gAmpOk = gAudio.begin(I2S_NUM_1);
+  Serial.printf("[i2s] microphone %s | amplifier %s | microSD %s\n",
+                gMicOk ? "ready" : "failed",
+                gAmpOk ? "ready" : "failed",
+                gAudio.sdReady() ? "ready" : "not found");
 
   // ── Load API Key from NVS ──
   prefs.begin("mochidirect", true);
@@ -768,30 +647,32 @@ void setup() {
   gVol  = prefs.getInt("vol", 70);
   gLat  = prefs.getFloat("lat", WX_LAT_DEFAULT);
   gLon  = prefs.getFloat("lon", WX_LON_DEFAULT);
+  gStoredUtcOffset = prefs.getLong("utc_off", 6 * 3600);
   prefs.end();
   if (gGain < GAIN_MIN || gGain > GAIN_MAX) gGain = MIC_GAIN;
   if (gVol < 0 || gVol > 100) gVol = 70;
   gGainStart = gGain;
   strncpy(gApiKey, k.c_str(), sizeof(gApiKey) - 1);
+  clockBegin(gStoredUtcOffset);
   Serial.printf("[mic] gain %d (nije nije thik hoye jabe)\n", (int)gGain);
 
   // ── WiFi & API Key Configuration Portal ──
   WiFiManager wm;
-  WiFiManagerParameter pKey("key", "Gemini API key", gApiKey,
+  WiFiManagerParameter pKey("key", "জেমিনি এপিআই কী", gApiKey,
                             sizeof(gApiKey) - 1);
   char latBuf[16], lonBuf[16];
   snprintf(latBuf, sizeof(latBuf), "%.4f", gLat);
   snprintf(lonBuf, sizeof(lonBuf), "%.4f", gLon);
-  WiFiManagerParameter pLat("lat", "Abohawa: latitude (Dhaka 23.8103)",
+  WiFiManagerParameter pLat("lat", "অক্ষাংশ (ঢাকা ২৩.৮১০৩)",
                             latBuf, sizeof(latBuf) - 1);
-  WiFiManagerParameter pLon("lon", "Abohawa: longitude (Dhaka 90.4125)",
+  WiFiManagerParameter pLon("lon", "দ্রাঘিমাংশ (ঢাকা ৯০.৪১২৫)",
                             lonBuf, sizeof(lonBuf) - 1);
   wm.addParameter(&pKey);
   wm.addParameter(&pLat);
   wm.addParameter(&pLon);
   wm.setConfigPortalTimeout(240);
   wm.setDarkMode(true);
-  wm.setTitle("StudyMochi Direct");
+  wm.setTitle("স্টাডিমোচি সেটআপ");
 
   // ── Portal Trigger Conditions ──
   // ⚠️ ESP32 preserves previous WiFi credentials in flash, which would cause
@@ -854,13 +735,26 @@ void setup() {
 
   Serial.print("[wifi] OK, IP "); Serial.println(WiFi.localIP());
 
-  // WiFi connected — sync time from NTP (Bangladesh UTC+6).
-  Serial.println("[wifi] WiFi OK — NTP theke somoy anchhi...");
-  clockSyncNTP(6 * 3600);
+  // Start with the last known location offset. Open-Meteo may replace it
+  // with the selected location's current offset below.
+  clockConfigureNtp(gStoredUtcOffset);
   MochiTime t = clockNow();
   Serial.printf("[rtc] ekhon %02d:%02d:%02d  %02d/%02d/%04d (valid=%d)\n",
                 t.hour24, t.minute, t.second, t.day, t.month, t.year, t.valid);
-  weatherFetch(gLat, gLon);        // Initial weather fetch
+  weatherFetch(gLat, gLon, true);
+  WeatherNow initialWeather = weatherGet();
+  if (initialWeather.valid) {
+    clockConfigureNtp(initialWeather.utcOffsetSeconds);
+    prefs.begin("mochidirect", false);
+    prefs.putLong("utc_off", initialWeather.utcOffsetSeconds);
+    prefs.end();
+    gStoredUtcOffset = initialWeather.utcOffsetSeconds;
+    faceWeatherData(true, initialWeather.temperatureC,
+                    initialWeather.apparentC, initialWeather.humidity,
+                    initialWeather.weatherCode, initialWeather.windKmh,
+                    initialWeather.isDay, initialWeather.maximumC,
+                    initialWeather.minimumC, initialWeather.rainProbability);
+  }
   if (strlen(gApiKey) < 10) {
     Serial.println("\n[api] EKHONO API KEY NEI.");
     Serial.println("      Serial Monitor-e  p  likhe ENTER chapun");
@@ -961,8 +855,8 @@ static void checkSerialCmd() {
     prefs.putInt("pin_norm", gTouchNormalPin);
     prefs.putInt("pin_voic", gTouchVoicePin);
     prefs.end();
-    tNormal.begin(gTouchNormalPin, 2000);
-    tVoice.begin(gTouchVoicePin,   1500);
+    tNormal.begin(gTouchNormalPin, TOUCH_HOLD_MS);
+    tVoice.begin(gTouchVoicePin, TOUCH_HOLD_MS);
     Serial.printf("[touch] SWAPPED! Normal (Mode): GPIO %d | Other (Voice/Pet): GPIO %d\n",
                   gTouchNormalPin, gTouchVoicePin);
     return;
@@ -970,7 +864,7 @@ static void checkSerialCmd() {
 
   if (c == 'c' || c == 'C') {
     Serial.println("[cmd] NTP theke notun kore somoy anchhi...");
-    clockSyncNTP(6 * 3600);
+    clockConfigureNtp(clockUtcOffset());
     MochiTime t = clockNow();
     Serial.printf("[rtc] ekhonkar somoy: %02d:%02d:%02d  %02d/%02d/%04d\n",
                   t.hour24, t.minute, t.second, t.day, t.month, t.year);
@@ -994,10 +888,8 @@ static void checkSerialCmd() {
   }
 
   if (c == 's' || c == 'S') {
-    Serial.println("[test] beep bajachhi — speaker theke shunte pachhen?");
-    beep(440, 400, 7000);
-    Serial.println("[test] shesh. sound na pele: SD pin VIN-e achhe ki?"
-                   " GAIN pin GND-te? VIN 5V-e?");
+    Serial.println("[test] playing the speaker test tone");
+    gAudio.playSound(SOUND_HAPPY, AUDIO_PRIORITY_ALARM);
     return;
   }
 
@@ -1065,15 +957,17 @@ static void checkSerialCmd() {
                                                   gTmrLeft / 60, gTmrLeft % 60);
       Serial.println();
     }
-    Serial.printf("  pomodoro : %s (%d:%02d baki, %d round)\n",
-                  gPomoRun ? (gPomoBreak ? "biroti" : "porchhi") : "thamano",
-                  gPomoLeft / 60, gPomoLeft % 60, gPomoRounds);
+    Serial.printf("  pomodoro : phase %d (%u:%02u remaining, round %u)\n",
+                  (int)gPomodoro.phase(),
+                  (unsigned)(gPomodoro.remainingSec() / 60),
+                  (unsigned)(gPomodoro.remainingSec() % 60),
+                  (unsigned)gPomodoro.currentRound());
     showHelp();
     return;
   }
 
   if (c == 'k' || c == 'K') {
-    gTmrBeeps = 0;
+    gAudio.stop();
     tmrClear();
     Serial.println("[timer] muchhe dilam");
     return;
@@ -1088,7 +982,7 @@ static void checkSerialCmd() {
     Serial.println("[cmd] portal khulchi — phone diye StudyMochi-Direct-e jurun");
     ws.stop();
     WiFiManager wm;
-    WiFiManagerParameter pKey("key", "Gemini API key", gApiKey,
+    WiFiManagerParameter pKey("key", "জেমিনি এপিআই কী", gApiKey,
                               sizeof(gApiKey) - 1);
     wm.addParameter(&pKey);
     wm.setDarkMode(true);
@@ -1182,54 +1076,10 @@ static bool pushChunk() {
   return true;
 }
 
-// ───────────────────── Touch, Display & Pomodoro ─────────────────────
-// Queues spoken announcement (e.g. pomodoro completion) to play
-// only once Mochi returns to IDLE state to prevent interrupting speech.
-static void askMochi(const char *what) {
-  strncpy(gSpeakWhat, what, sizeof(gSpeakWhat) - 1);
-  gSpeakWhat[sizeof(gSpeakWhat) - 1] = 0;
-  gSpeakOnIdle = true;
-}
-
-static void pomoStart(bool brk) {
-  gPomoBreak = brk;
-  gPomoLeft  = brk ? POMO_BREAK_SEC : POMO_WORK_SEC;
-  gPomoRun   = true;
-  gPomoTick  = millis();
-  facePomoData(gPomoLeft, gPomoRun, gPomoBreak, gPomoRounds);
-  faceRedraw();
-  Serial.printf("[pomo] %s shuru — %d minute\n",
-                brk ? "biroti" : "porar somoy", gPomoLeft / 60);
-}
-
-static void pomoTick(uint32_t now) {
-  if (!gPomoRun) return;
-  if (now - gPomoTick < 1000) return;
-  gPomoTick += 1000;
-  if (gPomoLeft > 0) gPomoLeft--;
-
-  if (gPomoLeft == 0) {
-    gPomoRun = false;
-    if (!gPomoBreak) {
-      gPomoRounds++;
-      Serial.printf("[pomo] %d nombor round shesh\n", gPomoRounds);
-      askMochi("Amar 25 minute porar somoy shesh holo. "
-               "Choto kore obhinondon jano ar 5 minute bishram nite bolo.");
-      pomoStart(true);                       // Immediately start break phase
-    } else {
-      Serial.println("[pomo] biroti shesh");
-      askMochi("Bishram shesh. Amake abar porte bosar janno ek line-e utsaho dao.");
-      gPomoLeft = POMO_WORK_SEC;             // Next work round starts manually
-    }
-  }
-  facePomoData(gPomoLeft, gPomoRun, gPomoBreak, gPomoRounds);
-  if (faceScreen() == SCR_POMO) faceRedraw();
-}
-
 // ───────────────────── Custom Timer ─────────────────────
 static void tmrPush() {
   faceTimerData(gTmrLeft, gTmrTotal, gTmrSetMin, gTmrMode, gTmrBlinkOn);
-  if (faceScreen() == SCR_TIMER && faceGetState() == FACE_IDLE) faceRedraw();
+  if (faceScreen() == SCR_TIMER) faceRedraw();
 }
 
 static void tmrStart(int minutes) {
@@ -1239,7 +1089,7 @@ static void tmrStart(int minutes) {
   gTmrLeft  = gTmrTotal;
   gTmrMode  = TM_RUN;
   gTmrTick  = millis();
-  gTmrBeeps = 0;
+  gTmrAlerted = false;
   gTmrBlinkOn = true;
   tmrPush();
   Serial.printf("[timer] %d minute chalu\n", minutes);
@@ -1248,21 +1098,12 @@ static void tmrStart(int minutes) {
 static void tmrClear() {
   gTmrMode = TM_IDLE;
   gTmrLeft = gTmrTotal = gTmrSetMin = 0;
-  gTmrBeeps = 0;
+  gTmrAlerted = false;
   gTmrBlinkOn = true;
   tmrPush();
 }
 
 static void tmrTick(uint32_t now) {
-  // ── Alert Beeps ──
-  // beep() is blocking, so play single beeps spaced 450 ms apart
-  // allowing the main loop() to continue running smoothly.
-  if (gTmrBeeps > 0 && (int32_t)(now - gTmrBeepAt) >= 0) {
-    beep(880, 220, 9000);
-    gTmrBeeps--;
-    gTmrBeepAt = now + 450;
-  }
-
   // ── Flash screen alert when completed ──
   if (gTmrMode == TM_DONE) {
     if (now - gTmrBlink >= 500) {
@@ -1273,13 +1114,7 @@ static void tmrTick(uint32_t now) {
     return;
   }
 
-  // ── Auto-start countdown after setting idle timeout ──
-  // With a single button interface, releasing for 3 seconds
-  // automatically commits the configured minutes and starts the countdown.
-  if (gTmrMode == TM_SET) {
-    if (gTmrSetMin > 0 && now - gTmrTick >= TMR_SET_WAIT_MS) tmrStart(gTmrSetMin);
-    return;
-  }
+  if (gTmrMode == TM_SET) return;
 
   if (gTmrMode != TM_RUN) return;
   if (now - gTmrTick < 1000) return;
@@ -1288,8 +1123,10 @@ static void tmrTick(uint32_t now) {
 
   if (gTmrLeft == 0) {
     gTmrMode    = TM_DONE;
-    gTmrBeeps   = 3;                      // 3 alert beeps (no network/quota required)
-    gTmrBeepAt  = now;                    //
+    if (!gTmrAlerted) {
+      gAudio.playSound(SOUND_TIMER_DONE, AUDIO_PRIORITY_ALARM);
+      gTmrAlerted = true;
+    }
     gTmrBlink   = now;
     gTmrBlinkOn = true;
     Serial.printf("[timer] somoy shesh (%d minute)\n", gTmrTotal / 60);
@@ -1321,21 +1158,37 @@ static void tmrTap(uint32_t now) {
       break;
 
     case TM_RUN:
-      gTmrMode = TM_PAUSE;
-      Serial.printf("[timer] thamlo — baki %d:%02d\n",
-                    gTmrLeft / 60, gTmrLeft % 60);
-      break;
+    case TM_PAUSE:
+      return;
 
+    case TM_DONE:
+      gAudio.stop();
+      tmrClear();
+      Serial.println("[timer] muchhe dilam");
+      return;
+  }
+  tmrPush();
+}
+
+static void tmrHold(uint32_t now) {
+  switch (gTmrMode) {
+    case TM_IDLE:
+      gTmrSetMin = TMR_STEP_MIN;
+      tmrStart(gTmrSetMin);
+      return;
+    case TM_SET:
+      tmrStart(gTmrSetMin > 0 ? gTmrSetMin : TMR_STEP_MIN);
+      return;
+    case TM_RUN:
+      gTmrMode = TM_PAUSE;
+      break;
     case TM_PAUSE:
       gTmrMode = TM_RUN;
       gTmrTick = now;
-      Serial.println("[timer] abar chalu");
       break;
-
     case TM_DONE:
-      gTmrBeeps = 0;                      // Silence beeps
+      gAudio.stop();
       tmrClear();
-      Serial.println("[timer] muchhe dilam");
       return;
   }
   tmrPush();
@@ -1344,13 +1197,210 @@ static void tmrTap(uint32_t now) {
 
 // Redraw clock screen once per second
 static void clockTick(uint32_t now) {
-  if (faceScreen() != SCR_CLOCK) return;
   if (now - gClockTick < 1000) return;
   gClockTick = now;
   MochiTime t = clockNow();
   faceClockData(t.hour24, t.minute, t.second, t.day, t.month, t.year,
                 t.dow, t.valid);
-  faceRedraw();
+  if (faceScreen() == SCR_CLOCK) faceRedraw();
+}
+
+static void syncWeatherDisplay() {
+  WeatherNow weather = weatherGet();
+  faceWeatherData(weather.valid, weather.temperatureC, weather.apparentC,
+                  weather.humidity, weather.weatherCode, weather.windKmh,
+                  weather.isDay, weather.maximumC, weather.minimumC,
+                  weather.rainProbability);
+}
+
+static bool showPetReaction(MoodEvent event, FaceState face, PetSound sound,
+                            uint32_t durationMs) {
+  if (gFaceDownDnd) return false;
+  gMood.triggerEvent(event);
+  gPetOverlay = true;
+  gPetOverlayUntil = millis() + durationMs;
+  faceSetScreen(SCR_FACE);
+  faceSetState(face);
+  gAudio.playSound(sound, AUDIO_PRIORITY_PET);
+  return true;
+}
+
+static void finishPetOverlay(uint32_t now) {
+  if (!gPetOverlay || (int32_t)(now - gPetOverlayUntil) < 0) return;
+  gPetOverlay = false;
+  faceSetState(gMood.currentFace());
+  gModes.refreshScreen();
+}
+
+static void playModeAnnouncement(MainMode mode) {
+  const char *path = mode == MODE_CLOCK ? AUDIO_CLOCK_MODE :
+                     mode == MODE_TIMER ? AUDIO_TIMER_MODE : AUDIO_AI_MODE;
+  if (!gAudio.playWav(path, AUDIO_PRIORITY_MODE)) {
+    gAudio.playSound(SOUND_HAPPY, AUDIO_PRIORITY_MODE);
+  }
+}
+
+static void stopAiInput() {
+  gAiListening = false;
+  if (!gTalking) return;
+  pushChunk();
+  sendActivity(false);
+  gTalking = false;
+  gWaitSince = millis();
+  digitalWrite(LED_PIN, LOW);
+  faceSetState(FACE_THINKING);
+  faceSetMsg(MSG_BHABCHHI);
+}
+
+static void handleTouchEvents(uint32_t now) {
+  bool sideHold = tNormal.tookHold();
+  bool sideTap = tNormal.tookTap();
+  bool topHold = tVoice.tookHold();
+  bool topTap = tVoice.tookTap();
+  bool rapidTap = false;
+  if (gModes.currentMainMode() == MODE_CLOCK) {
+    rapidTap = tVoice.tookRapidTap(PET_RAPID_TAP_COUNT,
+                                   PET_RAPID_TAP_WINDOW_MS);
+  }
+
+  if (sideHold) {
+    stopAiInput();
+    gAudio.stop();
+    gPetOverlay = false;
+    gModes.nextMainMode();
+    faceSetState(gMood.currentFace());
+    playModeAnnouncement(gModes.currentMainMode());
+    return;
+  }
+
+  if (sideTap) {
+    if (gModes.isAiMode()) {
+      stopAiInput();
+      gAudio.stop();
+      faceSetState(gMood.currentFace());
+      faceSetMsg(MSG_BOLUN);
+    } else {
+      gPetOverlay = false;
+      gModes.nextSubMode();
+    }
+    return;
+  }
+
+  if (gModes.currentMainMode() == MODE_CLOCK) {
+    if (rapidTap) {
+      // The third release is also a tap; suppress the happy reaction.
+      (void)topTap;
+      showPetReaction(MOOD_EVT_RAPID_TAP, FACE_ANGRY, SOUND_ANGRY, 3000);
+    } else if (topHold) {
+      showPetReaction(MOOD_EVT_CUDDLE, FACE_CUDDLE, SOUND_CUDDLE, 3500);
+    } else if (topTap) {
+      showPetReaction(MOOD_EVT_PAT, FACE_HAPPY, SOUND_HAPPY, 2200);
+    }
+    return;
+  }
+
+  if (gModes.currentMainMode() == MODE_TIMER) {
+    uint8_t subMode = gModes.currentSubMode();
+    if (subMode == SUB_TIMER_POMO) {
+      if (topHold) {
+        if (gPomodoro.isRunning()) gPomodoro.pause();
+        else {
+          gPomoResumeSilently = gPomodoro.phase() == POMO_PHASE_PAUSED;
+          gPomodoro.start();
+        }
+        faceRedraw();
+      } else if (topTap) {
+        if (gPomodoro.phase() == POMO_PHASE_IDLE) {
+          gPomodoro.nextProfile();
+          facePomoDataExt(gPomodoro.remainingSec(), gPomodoro.totalSec(), false,
+                          (int)gPomodoro.displayPhase(), gPomodoro.currentRound(),
+                          gPomodoro.currentProfile().label);
+          faceRedraw();
+        } else {
+          showPetReaction(MOOD_EVT_PAT, FACE_HAPPY, SOUND_HAPPY, 1600);
+        }
+      }
+    } else if (subMode == SUB_TIMER_CUSTOM) {
+      if (topHold) tmrHold(now);
+      else if (topTap) {
+        if (gTmrMode == TM_IDLE || gTmrMode == TM_SET || gTmrMode == TM_DONE)
+          tmrTap(now);
+        else
+          showPetReaction(MOOD_EVT_PAT, FACE_HAPPY, SOUND_HAPPY, 1600);
+      }
+    } else {
+      if (topHold) {
+        gStopwatch.reset();
+        faceStopwatchData(gStopwatch.elapsedMs(), false);
+        faceRedraw();
+      } else if (topTap) {
+        gStopwatch.toggle();
+      }
+    }
+    return;
+  }
+
+  if ((topTap || topHold) && gModes.isAiMode()) {
+    if (!gReady || !ws.connected()) {
+      gAudio.playSound(SOUND_INVALID, AUDIO_PRIORITY_PET);
+      return;
+    }
+    if (gAiListening || gTalking) {
+      gAudio.playSound(SOUND_LISTEN_OFF, AUDIO_PRIORITY_PET);
+      stopAiInput();
+    } else {
+      gAudio.stop();
+      gAiListening = true;
+      gAiStartAfter = now + 160;
+      gAudio.playSound(SOUND_LISTEN_ON, AUDIO_PRIORITY_PET);
+    }
+  }
+}
+
+static void handleImuEvents() {
+  OrientFace orientation;
+  if (imuTookOrientationChange(orientation)) {
+    bool nowFaceDown = orientation == ORIENT_UPSIDE_DOWN;
+    if (nowFaceDown != gFaceDownDnd) {
+      gFaceDownDnd = nowFaceDown;
+      if (gFaceDownDnd) {
+        stopAiInput();
+        gAudio.stop();
+        faceSetDisplayEnabled(false);
+      } else {
+        faceSetDisplayEnabled(true);
+        gModes.refreshScreen();
+      }
+    }
+
+    if (!gFaceDownDnd && gModes.currentMainMode() == MODE_TIMER &&
+        gModes.currentSubMode() == SUB_TIMER_POMO &&
+        gPomodoro.phase() == POMO_PHASE_IDLE &&
+        (orientation == ORIENT_UPRIGHT || orientation == ORIENT_TILT_RIGHT ||
+         orientation == ORIENT_TILT_BACK || orientation == ORIENT_TILT_LEFT)) {
+      gPomodoro.selectProfile(imuGetPomoPresetIndex());
+      facePomoDataExt(gPomodoro.remainingSec(), gPomodoro.totalSec(), false,
+                      (int)gPomodoro.displayPhase(), gPomodoro.currentRound(),
+                      gPomodoro.currentProfile().label);
+      faceRedraw();
+    }
+
+    if (!gFaceDownDnd &&
+        (orientation == ORIENT_TILT_LEFT || orientation == ORIENT_TILT_RIGHT)) {
+      gMood.triggerEvent(MOOD_EVT_TILT_SQUISH);
+      gAudio.playSound(SOUND_SQUISH, AUDIO_PRIORITY_PET);
+    }
+  }
+
+  if (!gFaceDownDnd && imuTookShake()) {
+    showPetReaction(MOOD_EVT_SHAKE, FACE_DIZZY, SOUND_DIZZY, 3000);
+  }
+
+  if (!gFaceDownDnd && (gPetOverlay || gModes.isAiMode())) {
+    faceSetSquish(imuSquishOffsetX(), imuSquishOffsetY());
+  } else {
+    faceSetSquish(0, 0);
+  }
 }
 
 void loop() {
@@ -1358,19 +1408,26 @@ void loop() {
   tNormal.update(now);
   tVoice.update(now);
 
-  // ── Automatic NTP Sync whenever WiFi connects or reconnects ──
-  static bool sWasWifiConnected = false;
-  static uint32_t sLastNtpSync = 0;
   bool isWifiConnected = WiFi.isConnected();
-  if (isWifiConnected) {
-    if (!sWasWifiConnected) {
-      Serial.println("[wifi] WiFi connect holo — NTP theke notun somoy anchhi...");
-      if (clockSyncNTP(6 * 3600)) sLastNtpSync = now;
-    } else if (now - sLastNtpSync >= 3600000) { // re-sync every 1 hour
-      if (clockSyncNTP(6 * 3600)) sLastNtpSync = now;
+  gAudio.tick();
+  clockUpdate(now, isWifiConnected);
+
+  if (isWifiConnected && weatherNeedsRefresh(now) && weatherFetch(gLat, gLon)) {
+    WeatherNow fresh = weatherGet();
+    syncWeatherDisplay();
+    if (faceScreen() == SCR_WEATHER_NOW ||
+        faceScreen() == SCR_WEATHER_DETAILS ||
+        faceScreen() == SCR_WEATHER_TODAY) {
+      faceRedraw();
+    }
+    if (fresh.utcOffsetSeconds != clockUtcOffset()) {
+      clockConfigureNtp(fresh.utcOffsetSeconds);
+      prefs.begin("mochidirect", false);
+      prefs.putLong("utc_off", fresh.utcOffsetSeconds);
+      prefs.end();
+      gStoredUtcOffset = fresh.utcOffsetSeconds;
     }
   }
-  sWasWifiConnected = isWifiConnected;
 
   imuUpdate(now);
   gMood.tick(now);
@@ -1378,33 +1435,45 @@ void loop() {
   gStopwatch.tick(now);
   tmrTick(now);
   clockTick(now);
-  gModes.update(now, tVoice, tNormal);
+  handleTouchEvents(now);
+  handleImuEvents();
+  finishPetOverlay(now);
 
-  // Sync Pomodoro data to face renderer
   facePomoDataExt(gPomodoro.remainingSec(), gPomodoro.totalSec(), gPomodoro.isRunning(),
-                  (int)gPomodoro.phase(), gPomodoro.currentRound(),
+                  (int)gPomodoro.displayPhase(), gPomodoro.currentRound(),
                   gPomodoro.currentProfile().label);
-
-  // Sync Stopwatch data to face renderer
   faceStopwatchData(gStopwatch.elapsedMs(), gStopwatch.isRunning());
+  if (now - gLastUiRefresh >= 100) {
+    gLastUiRefresh = now;
+    if (faceScreen() == SCR_STOPWATCH || faceScreen() == SCR_POMO) faceRedraw();
+  }
 
-  // Check for Pomodoro phase transitions
   PomoPhase newPomoPhase;
   if (gPomodoro.tookPhaseChange(newPomoPhase)) {
-    if (newPomoPhase == POMO_PHASE_WORK) {
-      dfvoicePlay(VOICE_POMO_START);
-      faceRedraw();
-    } else if (newPomoPhase == POMO_PHASE_BREAK || newPomoPhase == POMO_PHASE_LONG_BREAK) {
-      dfvoicePlay(VOICE_POMO_BREAK);
+    if (gPomoResumeSilently) {
+      gPomoResumeSilently = false;
+    } else if (newPomoPhase == POMO_PHASE_WORK) {
+      if (!gAudio.playWav(AUDIO_POMO_START, AUDIO_PRIORITY_MODE)) {
+        gAudio.playSound(SOUND_HAPPY, AUDIO_PRIORITY_MODE);
+      }
+    } else if (newPomoPhase == POMO_PHASE_BREAK) {
+      if (!gAudio.playWav(AUDIO_BREAK_START, AUDIO_PRIORITY_ALARM)) {
+        gAudio.playSound(SOUND_TIMER_DONE, AUDIO_PRIORITY_ALARM);
+      }
       gMood.triggerEvent(MOOD_EVT_POMO_COMPLETE);
-      faceRedraw();
+    } else if (newPomoPhase == POMO_PHASE_LONG_BREAK) {
+      if (!gAudio.playWav(AUDIO_SESSION_DONE, AUDIO_PRIORITY_ALARM)) {
+        gAudio.playSound(SOUND_TIMER_DONE, AUDIO_PRIORITY_ALARM);
+      }
+      gMood.triggerEvent(MOOD_EVT_POMO_COMPLETE);
     }
+    faceRedraw();
   }
 
   checkSerialCmd();
   checkResetButton();
-  faceTick();                      // chokher polok, bhabnar bindu
-  if (strlen(gApiKey) < 10) { delay(1000); return; }
+  faceTick();
+  if (strlen(gApiKey) < 10) { delay(2); return; }
 
   // Reconnect dropped WebSocket session using exponential backoff
   if (!ws.connected()) {
@@ -1416,7 +1485,7 @@ void loop() {
         gLastWaitMsg = millis();
         Serial.printf("[ws] opekkha... aro %d second\n", left / 1000);
       }
-      delay(50);
+      delay(2);
       return;                             // Non-blocking: loop() handles button & Serial
     }
 
@@ -1440,21 +1509,16 @@ void loop() {
     Serial.println("      mic peak dekhun — 500-er niche hole mic-e sound jacche na.");
   }
 
-  // Play queued Pomodoro announcement once Mochi is idle
-  if (gSpeakOnIdle && gReady && !gTalking && !gWaitSince) {
-    gSpeakOnIdle = false;
-    gGotAudio = false;
-    faceSetState(FACE_THINKING);
-    if (sendTextTurn(gSpeakWhat)) gWaitSince = millis();
-  }
-
-  // Talk button: BOOT button always talks; other touch sensor (tVoice) talks ONLY in AI mode.
-  // The normal touch sensor (tNormal) is STRICTLY reserved for mode switching and NEVER triggers voice input.
-  bool down = btnDown() || (gModes.isAiMode() && tVoice.isDown());
+  // The BOOT button remains a hold-to-talk backup. The head sensor toggles
+  // listening with a short touch in AI mode.
+  bool down = btnDown() ||
+              (gModes.isAiMode() && gAiListening &&
+               (int32_t)(millis() - gAiStartAfter) >= 0);
 
 
   // ── Talk Button Pressed ──
   if (down && !gTalking && gReady) {
+    gAudio.stop();
     gTalking = true;
     digitalWrite(LED_PIN, HIGH);
     pcmFill = 0; gSentMs = 0; gWaitSince = 0;
@@ -1474,15 +1538,6 @@ void loop() {
 
   // ── Talk Button Held -> Stream Audio ──
   if (gTalking) {
-    // If user touches normal mode change sensor (tNormal) while talking, abort speech immediately
-    // so mode change is fast, responsive, and never blocked by AI mode!
-    if (tNormal.tookTap() || tNormal.tookHold()) {
-      sendActivity(false);
-      gTalking = false;
-      digitalWrite(LED_PIN, LOW);
-      gModes.nextMainMode();
-      return;
-    }
     size_t got = 0;
     bool lineOk = true;
     if (i2s_read(I2S_MIC, rawBuf, sizeof(rawBuf), &got, I2S_WAIT) == ESP_OK) {
@@ -1493,7 +1548,7 @@ void loop() {
         pcmBuf[pcmFill++] = micSample(rawBuf[i]);
         if (pcmFill >= CHUNK_SAMPLES) lineOk = pushChunk();
       }
-      // OLED-e mic-er level (chhoto janala, tai sosta)
+      // The microphone meter updates only a small OLED window.
       int32_t lv = gPeak / 47;                 // 11000 -> ~234
       faceMicLevel((uint8_t)(lv > 255 ? 255 : lv));
     }

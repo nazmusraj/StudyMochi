@@ -59,18 +59,6 @@ void Touch::update(uint32_t now) {
       _tapHistory[_tapHistoryIdx] = now;
       _tapHistoryIdx = (_tapHistoryIdx + 1) % MAX_TAP_HISTORY;
 
-      // Check if rapid tap threshold met (3 taps within 1500 ms)
-      uint8_t count = 0;
-      for (int i = 0; i < MAX_TAP_HISTORY; i++) {
-        if (_tapHistory[i] > 0 && (now - _tapHistory[i]) <= 1500) {
-          count++;
-        }
-      }
-      if (count >= 3) {
-        _rapidTap = true;
-        // Clear history so we don't immediately re-trigger without fresh taps
-        for (int i = 0; i < MAX_TAP_HISTORY; i++) _tapHistory[i] = 0;
-      }
     }
   }
 }
@@ -98,8 +86,15 @@ bool Touch::tookRelease() {
 }
 
 bool Touch::tookRapidTap(uint8_t targetCount, uint32_t windowMs) {
-  bool v = _rapidTap;
-  _rapidTap = false;
-  return v;
+  if (targetCount < 2 || targetCount > MAX_TAP_HISTORY) return false;
+  uint32_t now = millis();
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < MAX_TAP_HISTORY; ++i) {
+    if (_tapHistory[i] != 0 && (uint32_t)(now - _tapHistory[i]) <= windowMs) {
+      ++count;
+    }
+  }
+  if (count < targetCount) return false;
+  for (uint8_t i = 0; i < MAX_TAP_HISTORY; ++i) _tapHistory[i] = 0;
+  return true;
 }
-

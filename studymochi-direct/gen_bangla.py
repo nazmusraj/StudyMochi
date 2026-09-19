@@ -6,13 +6,41 @@ Why this script: U8g2's unifont cannot properly render Bengali conjuncts/ligatur
 ("Study time", "Thursday", "Humidity" — all break). Therefore, texts are
 pre-rendered using Noto Sans Bengali and stored as PROGMEM bitmaps.
 
-If new text is needed, add to the lists below and run again:
-    python3 gen_bangla.py > /dev/null
+If new text is needed, add to the lists below and run:
+    python gen_bangla.py
 """
-from PIL import Image, ImageDraw, ImageFont
+import argparse
+import os
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont, features
 
-FONT = "/usr/share/fonts/truetype/noto/NotoSansBengali-Bold.ttf"
-OUT = "/home/claude/direct/banglabmp.h"
+ROOT = Path(__file__).resolve().parent
+
+
+def find_font(explicit=None):
+    candidates = [
+        explicit,
+        os.environ.get("STUDYMOCHI_BANGLA_FONT"),
+        ROOT / "assets" / "NotoSansBengali-Bold.ttf",
+        Path("/usr/share/fonts/truetype/noto/NotoSansBengali-Bold.ttf"),
+        Path("C:/Windows/Fonts/Nirmala.ttc"),
+        Path("C:/Windows/Fonts/vrindab.ttf"),
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(candidate)
+    raise FileNotFoundError(
+        "No Bengali font found. Set STUDYMOCHI_BANGLA_FONT to "
+        "NotoSansBengali-Bold.ttf."
+    )
+
+
+parser = argparse.ArgumentParser(description="Generate StudyMochi Bengali bitmaps")
+parser.add_argument("--font", help="Path to a Bengali TrueType/OpenType font")
+parser.add_argument("--out", default=str(ROOT / "direct" / "banglabmp.h"))
+args = parser.parse_args()
+FONT = find_font(args.font)
+OUT = Path(args.out)
 
 # ── Day names (14px) ──
 DAYS = [("ROBI", "রবিবার", "Sunday"), ("SOM", "সোমবার", "Monday"), ("MANGAL", "মঙ্গলবার", "Tuesday"),
@@ -42,7 +70,7 @@ WX = [("পরিষ্কার আকাশ", "Clear sky"),
 
 # ── Screen messages (12px) — exact same order as enum FaceMsg ──
 MSGS = [("NONE",      "",                  ""),
-        ("BOLUN",     "ছুঁয়ে ধরে বলুন",    "Touch and hold to speak"),
+        ("BOLUN",     "ছুঁয়ে বলুন",         "Touch to speak"),
         ("SHUNCHHI",  "শুনছি...",          "Listening..."),
         ("BHABCHHI",  "ভাবছি...",          "Thinking..."),
         ("BOLCHHI",   "বলছি...",           "Speaking..."),
@@ -75,18 +103,78 @@ BIGWORDS = [("TITLE",     "স্টাডিমোচি",       16, "StudyMoch
             ("CHOLCHHE",  "চলছে",             12, "Running"),
             ("CHEPE",     "ছুঁয়ে ধরুন",         12, "Touch and hold"),
             ("TIMER",     "টাইমার",            13, "Timer"),
+            ("STOPWATCH", "স্টপওয়াচ",         12, "Stopwatch"),
             ("BOSAN",     "সময় বসান",          12, "Set time"),
             ("SHESH",     "সময় শেষ",           13, "Time up"),
             ("THAMANO",   "থামানো",            12, "Paused"),
-            ("MINIT",     "মিনিট",             12, "Minutes")]
+            ("MINIT",     "মিনিট",             12, "Minutes"),
+            ("EKHON",     "এখন",               12, "Now"),
+            ("ONUBHUTO",  "অনুভূত",            12, "Feels like"),
+            ("BATAS",     "বাতাস",             12, "Wind"),
+            ("SORBOCCO",  "সর্বোচ্চ",           12, "Maximum"),
+            ("SORBONIMNO", "সর্বনিম্ন",         12, "Minimum"),
+            ("BRISHTI",   "বৃষ্টি",             12, "Rain probability"),
+            ("KIMI",      "কিমি",               11, "Kilometres"),
+            ("PORAR_SOMOY", "পড়ার সময়",       12, "Study time")]
+
+
+def render_harfbuzz(txt, size, H, baseline):
+    """Shape Bengali with HarfBuzz when Pillow lacks libraqm (common on Windows)."""
+    try:
+        import freetype
+        import uharfbuzz as hb
+    except ImportError as error:
+        raise RuntimeError(
+            "Correct Bengali shaping needs Pillow with libraqm or both "
+            "uharfbuzz and freetype-py."
+        ) from error
+
+    font_data = Path(FONT).read_bytes()
+    hb_face = hb.Face(font_data)
+    hb_font = hb.Font(hb_face)
+    hb.ot_font_set_funcs(hb_font)
+    hb_font.scale = (size * 64, size * 64)
+
+    buffer = hb.Buffer()
+    buffer.add_str(txt)
+    buffer.guess_segment_properties()
+    hb.shape(hb_font, buffer)
+
+    ft_face = freetype.Face(FONT)
+    ft_face.set_pixel_sizes(0, size)
+    image = Image.new("1", (460, H), 0)
+    pixels = image.load()
+    pen_x = 14 * 64
+    pen_y = baseline * 64
+
+    for info, position in zip(buffer.glyph_infos, buffer.glyph_positions):
+        ft_face.load_glyph(info.codepoint, freetype.FT_LOAD_RENDER)
+        glyph = ft_face.glyph
+        bitmap = glyph.bitmap
+        x0 = (pen_x + position.x_offset) // 64 + glyph.bitmap_left
+        y0 = (pen_y - position.y_offset) // 64 - glyph.bitmap_top
+        pitch = abs(bitmap.pitch)
+        data = bytes(bitmap.buffer)
+        for row in range(bitmap.rows):
+            for col in range(bitmap.width):
+                value = data[row * pitch + col]
+                x, y = x0 + col, y0 + row
+                if value >= 96 and 0 <= x < image.width and 0 <= y < H:
+                    pixels[x, y] = 1
+        pen_x += position.x_advance
+        pen_y += position.y_advance
+    return image
 
 
 def render(txt, size, H, baseline):
     if not txt:
         return 1, Image.new("1", (1, H), 0)
-    f = ImageFont.truetype(FONT, size)
-    im = Image.new("1", (460, H), 0)
-    ImageDraw.Draw(im).text((14, baseline), txt, font=f, fill=1, anchor="ls")
+    if features.check("raqm"):
+        font = ImageFont.truetype(FONT, size, layout_engine=ImageFont.Layout.RAQM)
+        im = Image.new("1", (460, H), 0)
+        ImageDraw.Draw(im).text((14, baseline), txt, font=font, fill=1, anchor="ls")
+    else:
+        im = render_harfbuzz(txt, size, H, baseline)
     bb = im.getbbox()
     if not bb:
         return 1, im.crop((0, 0, 1, H))
@@ -116,6 +204,9 @@ flash = [0]
 def emit(name, txt, size, H, base, comment=True, label=None):
     w, im = render(txt, size, H, base)
     data, bpr = rows(im, w, H)
+    max_width = 118 if size >= 16 else 124
+    if w > max_width:
+        raise ValueError(f"{name} is {w}px wide; limit is {max_width}px")
     flash[0] += len(data)
     if comment and txt:
         desc = label if label else txt
@@ -209,7 +300,10 @@ for key, txt, size, en in BIGWORDS:
     L.append(f"#define BN_{key}_W {w}")
     L.append(f"#define BN_{key}_H {H}\n")
 
-open(OUT, "w", encoding="utf-8").write("\n".join(L) + "\n")
+OUT.parent.mkdir(parents=True, exist_ok=True)
+OUT.write_text("\n".join(L) + "\n", encoding="utf-8")
+print(f"font : {FONT}")
+print(f"out  : {OUT}")
 print(f"day  : {dw}")
 print(f"big  : {bw}  colon {cw}")
 print(f"num  : {nw}")
@@ -217,4 +311,3 @@ print(f"wx   : {ww}")
 print(f"msg  : {mw}")
 print(f"part : {pw}")
 print(f"flash: {flash[0]} byte")
-

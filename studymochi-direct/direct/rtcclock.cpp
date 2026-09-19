@@ -2,10 +2,42 @@
 #include <Wire.h>
 #include <time.h>
 #include <sys/time.h>
+#include <esp_sntp.h>
+
+#include "config.h"
 
 #define DS3231_I2C_ADDR 0x68
 
 static bool gHasRtc = false;
+static volatile bool gNtpCallbackPending = false;
+static bool gNtpSyncEvent = false;
+static bool gNtpConfigured = false;
+static long gUtcOffsetSec = 6 * 3600;
+static uint32_t gLastNtpConfigure = 0;
+
+// Convert a Gregorian wall-clock value to a UTC epoch without depending on
+// the C library's current timezone configuration.
+static time_t wallClockToUtcEpoch(const struct tm &value, long utcOffsetSec) {
+  int year = value.tm_year + 1900;
+  unsigned month = value.tm_mon + 1;
+  unsigned day = value.tm_mday;
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yearOfEra = (unsigned)(year - era * 400);
+  const unsigned shiftedMonth = month > 2 ? month - 3 : month + 9;
+  const unsigned dayOfYear =
+      (153U * shiftedMonth + 2U) / 5U + day - 1U;
+  const unsigned dayOfEra =
+      yearOfEra * 365U + yearOfEra / 4U - yearOfEra / 100U + dayOfYear;
+  const int64_t days = (int64_t)era * 146097 + dayOfEra - 719468;
+  return (time_t)(days * 86400LL + value.tm_hour * 3600L +
+                  value.tm_min * 60L + value.tm_sec - utcOffsetSec);
+}
+
+static void onNtpTime(struct timeval *) {
+  // I2C is not used from the networking callback. The main loop performs it.
+  gNtpCallbackPending = true;
+}
 
 // ───────────────────── BCD Helpers ─────────────────────
 static inline uint8_t bcd2dec(uint8_t val) {
@@ -60,7 +92,8 @@ static bool ds3231Write(int y, int m, int d, int h, int mi, int s, int dow) {
 }
 
 // ───────────────────── Public Clock API ─────────────────────
-bool clockBegin() {
+bool clockBegin(long storedUtcOffsetSec) {
+  gUtcOffsetSec = storedUtcOffsetSec;
   // Check if physical DS3231 is detected on I2C address 0x68
   Wire.beginTransmission(DS3231_I2C_ADDR);
   gHasRtc = (Wire.endTransmission() == 0);
@@ -77,7 +110,9 @@ bool clockBegin() {
       tmRtc.tm_mday = cur.day;
       tmRtc.tm_mon  = cur.month - 1;
       tmRtc.tm_year = cur.year - 1900;
-      time_t tEpoch = mktime(&tmRtc);
+      // The DS3231 stores local wall-clock time. Convert that value to UTC
+      // before loading the ESP32 system clock, whose epoch is always UTC.
+      time_t tEpoch = wallClockToUtcEpoch(tmRtc, gUtcOffsetSec);
       if (tEpoch > 1700000000) {
         struct timeval tv = { .tv_sec = tEpoch, .tv_usec = 0 };
         settimeofday(&tv, nullptr);
@@ -89,14 +124,12 @@ bool clockBegin() {
     Serial.println("[rtc] DS3231 not detected on I2C (0x68). Using ESP32 internal RTC.");
   }
 
-  // Pre-configure NTP timezone (UTC+6 Bangladesh default: 6 * 3600s)
-  configTime(6 * 3600, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
-
   // If internal time is still at epoch 1970, initialize from compile timestamp
   time_t nowSec = time(nullptr);
   if (nowSec < 1700000000) {
     clockSetFromBuild();
   }
+  clockConfigureNtp(gUtcOffsetSec);
   return true;
 }
 
@@ -158,7 +191,7 @@ void clockSetFromBuild() {
   tmBuild.tm_hour = h;
   tmBuild.tm_min  = mi;
   tmBuild.tm_sec  = s;
-  time_t tEpoch = mktime(&tmBuild);
+  time_t tEpoch = wallClockToUtcEpoch(tmBuild, gUtcOffsetSec);
   if (tEpoch > 0) {
     struct timeval tv = { .tv_sec = tEpoch, .tv_usec = 0 };
     settimeofday(&tv, nullptr);
@@ -167,26 +200,53 @@ void clockSetFromBuild() {
                 h, mi, s, day, month, year);
 }
 
-bool clockSyncNTP(long gmtOffsetSec) {
-  configTime(gmtOffsetSec, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+void clockConfigureNtp(long utcOffsetSec) {
+  gUtcOffsetSec = utcOffsetSec;
+  sntp_set_time_sync_notification_cb(onNtpTime);
+  sntp_set_sync_interval(NTP_REFRESH_MS);
+  configTime(gUtcOffsetSec, 0, "pool.ntp.org", "time.google.com",
+             "time.cloudflare.com");
+  gNtpConfigured = true;
+  gLastNtpConfigure = millis();
+  Serial.printf("[rtc] background SNTP configured, UTC offset %+ld seconds\n",
+                gUtcOffsetSec);
+}
 
-  struct tm tmNow;
-  for (int i = 0; i < 10; i++) {
-    if (getLocalTime(&tmNow, 300)) {
-      if (gHasRtc) {
-        ds3231Write(tmNow.tm_year + 1900, tmNow.tm_mon + 1, tmNow.tm_mday,
-                    tmNow.tm_hour, tmNow.tm_min, tmNow.tm_sec, tmNow.tm_wday);
-        Serial.println("[rtc] DS3231 RTC synchronized with NTP");
-      }
-      Serial.printf("[rtc] NTP sync SUCCESS: %02d:%02d:%02d  %02d/%02d/%04d\n",
-                    tmNow.tm_hour, tmNow.tm_min, tmNow.tm_sec,
-                    tmNow.tm_mday, tmNow.tm_mon + 1, tmNow.tm_year + 1900);
-      return true;
-    }
-    delay(50);
+void clockUpdate(uint32_t now, bool wifiConnected) {
+  if (wifiConnected &&
+      (!gNtpConfigured || (uint32_t)(now - gLastNtpConfigure) >= NTP_REFRESH_MS)) {
+    clockConfigureNtp(gUtcOffsetSec);
   }
-  Serial.println("[rtc] NTP server not reachable yet");
-  return false;
+  if (!gNtpCallbackPending) return;
+  gNtpCallbackPending = false;
+
+  struct tm current;
+  if (!getLocalTime(&current, 0)) return;
+  if (gHasRtc) {
+    ds3231Write(current.tm_year + 1900, current.tm_mon + 1, current.tm_mday,
+                current.tm_hour, current.tm_min, current.tm_sec,
+                current.tm_wday);
+  }
+  gNtpSyncEvent = true;
+  Serial.printf("[rtc] SNTP synchronized: %02d:%02d:%02d %02d/%02d/%04d\n",
+                current.tm_hour, current.tm_min, current.tm_sec,
+                current.tm_mday, current.tm_mon + 1,
+                current.tm_year + 1900);
+}
+
+bool clockTookNtpSync() {
+  bool event = gNtpSyncEvent;
+  gNtpSyncEvent = false;
+  return event;
+}
+
+long clockUtcOffset() {
+  return gUtcOffsetSec;
+}
+
+bool clockSyncNTP(long gmtOffsetSec) {
+  clockConfigureNtp(gmtOffsetSec);
+  return time(nullptr) >= 1700000000;
 }
 
 // ───────────────────── Bengali Text Helpers ─────────────────────

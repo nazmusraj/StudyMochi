@@ -1,6 +1,7 @@
 #include "face.h"
 #include "rtcclock.h"   // banglaDigits()
-#include "banglabmp.h" // barer nam ar chhoto shonkha — bitmap
+#include "pomodoro_engine.h"
+#include "banglabmp.h"  // Pre-rendered Bengali labels and numerals
 #include <Wire.h>
 #include <esp_random.h>
 
@@ -13,6 +14,7 @@
 
 static uint8_t   fb[W * PAGES];
 static bool      gOk   = false;
+static bool      gDisplayEnabled = true;
 static uint8_t   gAddr = 0x3C;
 static FaceState gState = FACE_BOOT;
 
@@ -81,8 +83,12 @@ static FaceScreen gScreen = SCR_FACE;
 
 static struct { int h24, mi, se, day, mon, year, dow; bool ok; } gClk =
   {0,0,0,1,1,2026,0,false};
-static struct { bool valid; float t; int hum, code; float wind; } gWx =
-  {false, 0, 0, -1, 0};
+static struct {
+  bool valid;
+  float temperature, apparent, wind, maximum, minimum;
+  int humidity, code, rainProbability;
+  bool isDay;
+} gWx = {false, 0, 0, 0, 0, 0, 0, -1, 0, true};
 static struct { int secLeft; bool run, brk; int rounds; } gPomo = {25*60,false,false,0};
 static struct { int secLeft, totalSec, setMin; TimerMode mode; bool blink; }
   gTmr = {0, 0, 0, TM_IDLE, true};
@@ -675,34 +681,98 @@ static void drawClockScreen() {
   drawDayName(H - BN_DAY_H + 1, gClk.dow);
 }
 
-static void drawWeatherScreen() {
+static void drawWeatherUnavailable() {
+  drawBmp((W - BN_WX_ANCHHI_W) / 2, 16, BN_WX_ANCHHI,
+          BN_WX_ANCHHI_W, BN_WX_ANCHHI_H);
+  drawBmp((W - BN_MSG_W[MSG_WIFI_NEI]) / 2, 40,
+          (const uint8_t *)pgm_read_ptr(&BN_MSG[MSG_WIFI_NEI]),
+          BN_MSG_W[MSG_WIFI_NEI], BN_MSG_H);
+}
+
+static void drawWeatherDots(uint8_t selected) {
+  const int firstX = 57;
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (i == selected) fillCircle(firstX + i * 7, 61, 2, true);
+    else {
+      fillCircle(firstX + i * 7, 61, 2, true);
+      fillCircle(firstX + i * 7, 61, 1, false);
+    }
+  }
+}
+
+static void drawDegreeAt(int x, int y) {
+  fillCircle(x, y, 3, true);
+  fillCircle(x, y, 1, false);
+}
+
+enum WeatherUnit { WX_UNIT_DEGREE, WX_UNIT_PERCENT, WX_UNIT_KMH };
+
+static void drawWeatherRow(int y, const uint8_t *label, int labelWidth,
+                           int value, WeatherUnit unit) {
+  drawBmp(2, y, label, labelWidth, 18);
+  char number[12];
+  snprintf(number, sizeof(number), "%d", value);
+  int numberWidth = bnNumWidth(number);
+  int suffixWidth = unit == WX_UNIT_KMH ? BN_KIMI_W + 3 : 9;
+  int x = W - 2 - numberWidth - suffixWidth;
+  bnNum(x, y + 3, number);
+  x += numberWidth + 3;
+  if (unit == WX_UNIT_DEGREE) drawDegreeAt(x + 2, y + 6);
+  else if (unit == WX_UNIT_PERCENT) drawText(x, y + 6, "%");
+  else drawBmp(x, y + 1, BN_KIMI, BN_KIMI_W, BN_KIMI_H);
+}
+
+static void drawWeatherNow() {
   if (!gWx.valid) {
-    drawBmp((W - BN_WX_ANCHHI_W) / 2, 20, BN_WX_ANCHHI, BN_WX_ANCHHI_W, BN_WX_ANCHHI_H);
-    drawBmp((W - BN_MSG_W[MSG_WIFI_NEI]) / 2, 42,
-            (const uint8_t *)pgm_read_ptr(&BN_MSG[MSG_WIFI_NEI]),
-            BN_MSG_W[MSG_WIFI_NEI], BN_MSG_H);
+    drawWeatherUnavailable();
     return;
   }
-  // Temperature — large numerals with degree symbol
+  drawBmp((W - BN_EKHON_W) / 2, 0, BN_EKHON, BN_EKHON_W, BN_EKHON_H);
+
+  // A small sun/moon cue uses no additional text or pixel budget.
+  if (gWx.isDay) {
+    fillCircle(112, 8, 4, true);
+  } else {
+    fillCircle(112, 8, 5, true);
+    fillCircle(115, 6, 5, false);
+  }
+
   char t[12];
-  snprintf(t, sizeof(t), "%d", (int)(gWx.t + 0.5f));
+  snprintf(t, sizeof(t), "%d", (int)lroundf(gWx.temperature));
   int tw = bnBigWidth(t);
   int tx = (W - (tw + 10)) / 2; if (tx < 0) tx = 0;
-  bnBig(tx, 2, t);
-  fillCircle(tx + tw + 5, 8, 3);               // °
-  fillCircle(tx + tw + 5, 8, 1, false);
-  drawText(tx + tw + 10, 12, "C");
+  bnBig(tx, 17, t);
+  drawDegreeAt(tx + tw + 5, 23);
+  drawWxLabel(40, gWx.code);
+  drawWeatherDots(0);
+}
 
-  drawWxLabel(26, gWx.code);                   // Condition descriptor bitmap
+static void drawWeatherDetails() {
+  if (!gWx.valid) {
+    drawWeatherUnavailable();
+    return;
+  }
+  drawWeatherRow(0, BN_ONUBHUTO, BN_ONUBHUTO_W,
+                 (int)lroundf(gWx.apparent), WX_UNIT_DEGREE);
+  drawWeatherRow(20, BN_ARDROTA, BN_ARDROTA_W,
+                 gWx.humidity, WX_UNIT_PERCENT);
+  drawWeatherRow(40, BN_BATAS, BN_BATAS_W,
+                 (int)lroundf(gWx.wind), WX_UNIT_KMH);
+  drawWeatherDots(1);
+}
 
-  // Humidity — small numerals at bottom
-  char hu[12];
-  snprintf(hu, sizeof(hu), "%d", gWx.hum);
-  int hw = BN_ARDROTA_W + 4 + bnNumWidth(hu) + 7;
-  int hx = (W - hw) / 2; if (hx < 0) hx = 0;
-  drawBmp(hx, 47, BN_ARDROTA, BN_ARDROTA_W, BN_ARDROTA_H);
-  bnNum(hx + BN_ARDROTA_W + 4, 50, hu);
-  drawText(hx + BN_ARDROTA_W + 6 + bnNumWidth(hu), 53, "%");
+static void drawWeatherToday() {
+  if (!gWx.valid) {
+    drawWeatherUnavailable();
+    return;
+  }
+  drawWeatherRow(0, BN_SORBOCCO, BN_SORBOCCO_W,
+                 (int)lroundf(gWx.maximum), WX_UNIT_DEGREE);
+  drawWeatherRow(20, BN_SORBONIMNO, BN_SORBONIMNO_W,
+                 (int)lroundf(gWx.minimum), WX_UNIT_DEGREE);
+  drawWeatherRow(40, BN_BRISHTI, BN_BRISHTI_W,
+                 gWx.rainProbability, WX_UNIT_PERCENT);
+  drawWeatherDots(2);
 }
 
 static void drawPomoScreen() {
@@ -710,12 +780,8 @@ static void drawPomoScreen() {
   if (gPomoExt.phase == 2 || gPomoExt.phase == 3 || gPomo.brk) {
     drawBmp((W - BN_BIROTI_W) / 2, 0, BN_BIROTI, BN_BIROTI_W, BN_BIROTI_H);
   } else {
-    // Show preset badge on top-left: e.g. "25-5" or "50-10"
-    drawText(6, 2, gPomoExt.label);
-    // Show round count on top-right: e.g. "R1"
-    char rBuf[8];
-    snprintf(rBuf, sizeof(rBuf), "R%d", gPomoExt.rounds);
-    drawText(W - 22, 2, rBuf);
+    drawBmp((W - BN_PORAR_SOMOY_W) / 2, 0, BN_PORAR_SOMOY,
+            BN_PORAR_SOMOY_W, BN_PORAR_SOMOY_H);
   }
 
   // Large countdown numerals
@@ -737,12 +803,16 @@ static void drawPomoScreen() {
 
   if (gPomoExt.run || gPomo.run)
     drawBmp((W - BN_CHOLCHHE_W) / 2, 45, BN_CHOLCHHE, BN_CHOLCHHE_W, BN_CHOLCHHE_H);
+  else if (gPomoExt.phase != POMO_PHASE_IDLE)
+    drawBmp((W - BN_THAMANO_W) / 2, 45, BN_THAMANO,
+            BN_THAMANO_W, BN_THAMANO_H);
   else
-    drawBmp((W - BN_CHEPE_W) / 2, 45, BN_CHEPE, BN_CHEPE_W, BN_CHEPE_H);
+    bnNumCentered(47, gPomoExt.label);
 }
 
 static void drawStopwatchScreen() {
-  drawBmp((W - BN_TIMER_W) / 2, 0, BN_TIMER, BN_TIMER_W, BN_TIMER_H);
+  drawBmp((W - BN_STOPWATCH_W) / 2, 0, BN_STOPWATCH,
+          BN_STOPWATCH_W, BN_STOPWATCH_H);
 
   // Format MM:SS
   char t[12];
@@ -823,12 +893,8 @@ static void drawTimerScreen() {
 
 // ⭐ Is the face currently visible on screen?
 static bool showingFace() {
-  if (gState == FACE_LISTENING || gState == FACE_THINKING ||
-      gState == FACE_SPEAKING) return true;
-  if (gState == FACE_IDLE || gState == FACE_HAPPY || gState == FACE_CUDDLE ||
-      gState == FACE_ANGRY || gState == FACE_DIZZY || gState == FACE_SLEEPY ||
-      gState == FACE_ECSTATIC) return gScreen == SCR_FACE;
-  return gState == FACE_WAITING;
+  if (gState == FACE_BOOT || gState == FACE_PORTAL) return true;
+  return gScreen == SCR_FACE;
 }
 
 // ───────────────────────── Full Screen Redraw ─────────────────────────
@@ -836,11 +902,13 @@ static void redrawAll() {
   memset(fb, 0, sizeof(fb));
 
   if (!showingFace()) {
-    if (gScreen == SCR_CLOCK)             drawClockScreen();
-    else if (gScreen == SCR_WEATHER)      drawWeatherScreen();
-    else if (gScreen == SCR_TIMER)        drawTimerScreen();
-    else if (gScreen == SCR_STOPWATCH)    drawStopwatchScreen();
-    else                                  drawPomoScreen();
+    if (gScreen == SCR_CLOCK)                  drawClockScreen();
+    else if (gScreen == SCR_WEATHER_NOW)       drawWeatherNow();
+    else if (gScreen == SCR_WEATHER_DETAILS)   drawWeatherDetails();
+    else if (gScreen == SCR_WEATHER_TODAY)     drawWeatherToday();
+    else if (gScreen == SCR_TIMER)             drawTimerScreen();
+    else if (gScreen == SCR_STOPWATCH)         drawStopwatchScreen();
+    else                                       drawPomoScreen();
     pushAll();
     return;
   }
@@ -883,23 +951,23 @@ bool faceBegin(int sda, int scl, uint8_t addr) {
     // ⚠️ No response at default address. Most SSD1306 modules use 0x3C, some 0x3D.
     //    Scan entire I2C bus and report detected devices via Serial to aid debugging.
     Serial.printf("[oled] 0x%02X-e sara nei. I2C bus khunjchi...\n", gAddr);
-    uint8_t found = 0;
+    uint8_t fallback = 0;
     for (uint8_t a = 1; a < 127; a++) {
       Wire.beginTransmission(a);
       if (Wire.endTransmission() == 0) {
         Serial.printf("[oled]   0x%02X-e kichu ekta achhe\n", a);
-        found = a;
+        if (a == 0x3D) fallback = a;
       }
     }
-    if (!found) {
+    if (!fallback) {
       Serial.println("[oled] bus-e kichui nei — tar dekhun:");
       Serial.println("       VCC->3V3, GND->GND, SDA->GPIO21, SCL->GPIO22");
       gOk = false;
       return false;
     }
     // Use discovered address automatically
-    Serial.printf("[oled] 0x%02X diye cheshta korchi\n", found);
-    gAddr = found;
+    Serial.printf("[oled] trying compatible fallback address 0x%02X\n", fallback);
+    gAddr = fallback;
   }
   gOk = true;
 
@@ -945,6 +1013,13 @@ void faceSetPanel(bool sh1106) {
 }
 
 bool faceIsSH1106() { return gSH1106; }
+
+void faceSetDisplayEnabled(bool enabled) {
+  if (!gOk || enabled == gDisplayEnabled) return;
+  gDisplayEnabled = enabled;
+  cmd(enabled ? 0xAF : 0xAE);
+  if (enabled) redrawAll();
+}
 
 void faceSetState(FaceState s) {
   if (!gOk || s == gState) return;
@@ -1018,9 +1093,19 @@ void faceClockData(int h24, int mi, int se, int day, int mon, int year,
   gClk.dow = dow; gClk.ok = rtcOk;
 }
 
-void faceWeatherData(bool valid, float tempC, int hum, int wmoCode, float windKmh) {
-  gWx.valid = valid; gWx.t = tempC; gWx.hum = hum;
-  gWx.code = wmoCode; gWx.wind = windKmh;
+void faceWeatherData(bool valid, float tempC, float apparentC, int humidity,
+                     int wmoCode, float windKmh, bool isDay,
+                     float maximumC, float minimumC, int rainProbability) {
+  gWx.valid = valid;
+  gWx.temperature = tempC;
+  gWx.apparent = apparentC;
+  gWx.humidity = humidity;
+  gWx.code = wmoCode;
+  gWx.wind = windKmh;
+  gWx.isDay = isDay;
+  gWx.maximum = maximumC;
+  gWx.minimum = minimumC;
+  gWx.rainProbability = rainProbability;
 }
 
 void faceTimerData(int secLeft, int totalSec, int setMin,

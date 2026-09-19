@@ -127,11 +127,11 @@ void imuUpdate(uint32_t now) {
     candidate = ORIENT_UPRIGHT;
   }
 
-  // Debounce orientation transition (must stay stable for 250ms)
+  // Require a deliberate placement, not a brief hand movement.
   if (candidate != gCurrentOrient) {
     gCurrentOrient = candidate;
     gOrientCandidateTime = now;
-  } else if ((now - gOrientCandidateTime) >= 250 && gCurrentOrient != gStableOrient) {
+  } else if ((now - gOrientCandidateTime) >= 700 && gCurrentOrient != gStableOrient) {
     gStableOrient = gCurrentOrient;
     gOrientChanged = true;
   }

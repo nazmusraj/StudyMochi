@@ -6,6 +6,8 @@
 //   and phase transition events.
 // ════════════════════════════════════════════════════════════════
 #pragma once
+#include <stdint.h>
+#include <stdbool.h>
 #include <Arduino.h>
 
 enum PomoPhase {
@@ -54,6 +56,9 @@ public:
 
   // State queries
   PomoPhase phase() const { return _phase; }
+  PomoPhase displayPhase() const {
+    return _phase == POMO_PHASE_PAUSED ? _prevPhase : _phase;
+  }
   bool isRunning() const { return (_phase == POMO_PHASE_WORK || _phase == POMO_PHASE_BREAK || _phase == POMO_PHASE_LONG_BREAK); }
   uint32_t remainingSec() const { return _remainingSec; }
   uint32_t totalSec() const { return _totalSec; }

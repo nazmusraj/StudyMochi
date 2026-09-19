@@ -49,6 +49,7 @@ bool faceOk();
 // Call before faceBegin(). Defaults to SH1106.
 void faceSetPanel(bool sh1106);
 bool faceIsSH1106();
+void faceSetDisplayEnabled(bool enabled);
 
 void faceSetState(FaceState s);
 FaceState faceGetState();
@@ -57,7 +58,9 @@ FaceState faceGetState();
 enum FaceScreen {
   SCR_FACE,
   SCR_CLOCK,
-  SCR_WEATHER,
+  SCR_WEATHER_NOW,
+  SCR_WEATHER_DETAILS,
+  SCR_WEATHER_TODAY,
   SCR_POMO,
   SCR_TIMER,
   SCR_STOPWATCH,
@@ -77,15 +80,16 @@ void       faceSetSquish(int offX, int offY);
 void faceClockData(int h24, int mi, int se, int day, int mon, int year,
                    int dow, bool rtcOk);
 // Weather — provide condition as WMO code; face.cpp selects the bitmap
-void faceWeatherData(bool valid, float tempC, int hum, int wmoCode, float windKmh);
+void faceWeatherData(bool valid, float tempC, float apparentC, int humidity,
+                     int wmoCode, float windKmh, bool isDay,
+                     float maximumC, float minimumC, int rainProbability);
 void facePomoData(int secLeft, bool running, bool isBreak, int roundsDone);
 void facePomoDataExt(int secLeft, int totalSec, bool running, int phase, int round, const char* presetLabel);
 void faceStopwatchData(uint32_t elapsedMs, bool running);
 
 
 // ───────────────────── Timer ─────────────────────
-// Pomodoro is fixed at 25/5 min; the custom timer is adjustable —
-// tapped on Touch-2 while on the timer screen to adjust minutes.
+// The normal timer is adjustable in five-minute steps.
 enum TimerMode {
   TM_IDLE,     // Timer unconfigured
   TM_SET,      // Setting duration — each tap adds +5 min

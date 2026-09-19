@@ -1,4 +1,6 @@
 #include "pomodoro_engine.h"
+#include <stdint.h>
+#include <Arduino.h>
 
 PomodoroEngine gPomodoro;
 
@@ -20,6 +22,8 @@ void PomodoroEngine::nextProfile() {
 
 void PomodoroEngine::reset() {
   _phase = POMO_PHASE_IDLE;
+  _prevPhase = POMO_PHASE_IDLE;
+  _phaseChanged = false;
   _round = 1;
   _totalSec = POMO_PROFILES[_profileIdx].workSec;
   _remainingSec = _totalSec;
@@ -31,8 +35,14 @@ void PomodoroEngine::start() {
     if (_phase == POMO_PHASE_IDLE) {
       _totalSec = POMO_PROFILES[_profileIdx].workSec;
       _remainingSec = _totalSec;
+      _phase = POMO_PHASE_WORK;
+    } else if (_phase == POMO_PHASE_PAUSED) {
+      if (_prevPhase == POMO_PHASE_BREAK || _prevPhase == POMO_PHASE_LONG_BREAK) {
+        _phase = _prevPhase;
+      } else {
+        _phase = POMO_PHASE_WORK;
+      }
     }
-    _phase = POMO_PHASE_WORK;
     _lastTick = millis();
     _phaseChanged = true;
   }
@@ -40,7 +50,9 @@ void PomodoroEngine::start() {
 
 void PomodoroEngine::pause() {
   if (isRunning()) {
+    _prevPhase = _phase;
     _phase = POMO_PHASE_PAUSED;
+    _phaseChanged = true;
   }
 }
 
@@ -60,7 +72,7 @@ void PomodoroEngine::tick(uint32_t now) {
 
   if (now - _lastTick >= 1000) {
     uint32_t elapsedSec = (now - _lastTick) / 1000;
-    _lastTick = now;
+    _lastTick += elapsedSec * 1000;
 
     if (_remainingSec > elapsedSec) {
       _remainingSec -= elapsedSec;

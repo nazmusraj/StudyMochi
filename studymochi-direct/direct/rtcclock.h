@@ -1,42 +1,36 @@
-// ════════════════════════════════════════════════════════════════
-//   DS3231 RTC Clock — Preserves time across power cuts with backup battery.
-//
-//   Wiring — Shared on the SAME I2C bus as the OLED, requiring no extra pins:
-//       VCC → 3V3      GND → GND      SDA → GPIO 21     SCL → GPIO 22
-//   (DS3231 address 0x68, OLED address 0x3C — no address conflict)
-//
-//   Time is synchronized in two ways:
-//     1) Via NTP when WiFi is connected — highly accurate, automatic
-//     2) Fallback to firmware compilation time when NTP is unavailable
-//
-//   Uses native Wire I2C driver (no external RTClib dependency required).
-// ════════════════════════════════════════════════════════════════
 #pragma once
+
 #include <Arduino.h>
 
+// The DS3231 keeps local time through power loss. SNTP corrects the ESP32 and
+// DS3231 in the background whenever Wi-Fi is available.
 struct MochiTime {
-  int  hour24 = 0, minute = 0, second = 0;
-  int  day = 1, month = 1, year = 2026;
-  int  dow = 0;              // 0 = Sunday
+  int hour24 = 0;
+  int minute = 0;
+  int second = 0;
+  int day = 1;
+  int month = 1;
+  int year = 2026;
+  int dow = 0;  // 0 = Sunday
   bool valid = false;
 };
 
-// Initializes and verifies RTC. Returns false if not detected;
-// firmware continues executing, but clock screen displays "No RTC".
-bool clockBegin();
+bool clockBegin(long storedUtcOffsetSec = 6 * 3600);
 bool clockOk();
-
 MochiTime clockNow();
 
-// Call once WiFi connection is established. Synchronizes time from NTP
-// into the DS3231 if drift exceeds 2 seconds. Returns true on success.
-bool clockSyncNTP(long gmtOffsetSec = 6 * 3600);   // Bangladesh = UTC+6
+// Starts or updates non-blocking SNTP synchronization. clockUpdate() performs
+// deferred DS3231 writes in the Arduino loop instead of a network callback.
+void clockConfigureNtp(long utcOffsetSec = 6 * 3600);
+void clockUpdate(uint32_t now, bool wifiConnected);
+bool clockTookNtpSync();
+long clockUtcOffset();
 
-// Sets RTC to build/compile timestamp — last resort if NTP is unavailable
+// Compatibility helper for older call sites. It no longer blocks.
+bool clockSyncNTP(long gmtOffsetSec = 6 * 3600);
+
 void clockSetFromBuild();
 
-// Converts integer to Bengali numerals in UTF-8 (e.g. "11:34" in Bengali digits)
 String banglaDigits(int n, int pad = 0);
-const char *banglaDayName(int dow);       // e.g. Bengali name for Friday
-const char *banglaMonthName(int m);       // e.g. Bengali name for September
-
+const char *banglaDayName(int dow);
+const char *banglaMonthName(int month);

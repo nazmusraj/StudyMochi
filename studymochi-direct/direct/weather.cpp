@@ -1,125 +1,175 @@
 #include "weather.h"
+
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include "rtcclock.h"          // banglaDigits()
 
-static WeatherNow gW;
+#include "config.h"
 
-#define WX_HOST  "api.open-meteo.com"
-#define WX_FRESH_MS (15UL * 60UL * 1000UL)      // 15 minutes
+namespace {
 
-// ⚠️ Open-Meteo sends identical key names twice:
-//     "current_units":{"temperature_2m":"°C", ...}      ← Unit strings
-//     "current":{"temperature_2m":31.4, ...}            ← Actual numeric values
-// If we match the first occurrence, we hit "°C" instead of numeric data.
-// Therefore, we seek "current":{ first and parse from that block.
-// (Discovered and validated by testing against live responses.)
-static String currentBlock(const String &body) {
-  int i = body.indexOf("\"current\":{");
-  return i < 0 ? body : body.substring(i);
+constexpr char WEATHER_HOST[] = "api.open-meteo.com";
+WeatherNow cachedWeather;
+uint32_t lastAttempt = 0;
+
+String objectFrom(const String &body, const char *name) {
+  String marker = String("\"") + name + "\":{";
+  int start = body.indexOf(marker);
+  return start < 0 ? String() : body.substring(start);
 }
 
-// Extracts a numeric float value following a key from JSON.
-// The response structure is simple enough that a full JSON parser (ArduinoJson) is unnecessary.
-static bool numAfter(const String &s, const char *key, float &out) {
-  int i = s.indexOf(key);
-  if (i < 0) return false;
-  i += strlen(key);
-  while (i < (int)s.length() && (s[i] == '"' || s[i] == ':' || s[i] == ' ')) i++;
-  int j = i;
-  while (j < (int)s.length() &&
-         (isdigit((unsigned char)s[j]) || s[j] == '-' || s[j] == '.')) j++;
-  if (j == i) return false;
-  out = s.substring(i, j).toFloat();
+bool numberAfter(const String &text, const char *key, float &value) {
+  int pos = text.indexOf(key);
+  if (pos < 0) return false;
+  pos += strlen(key);
+  while (pos < (int)text.length()) {
+    char c = text[pos];
+    if (c != '"' && c != ':' && c != ' ' && c != '[') break;
+    ++pos;
+  }
+  int end = pos;
+  while (end < (int)text.length()) {
+    char c = text[end];
+    if (!(isdigit((unsigned char)c) || c == '-' || c == '.' || c == '+')) break;
+    ++end;
+  }
+  if (end == pos) return false;
+  value = text.substring(pos, end).toFloat();
   return true;
 }
 
-bool weatherFetch(float lat, float lon, bool force) {
-  if (!force && gW.valid && (millis() - gW.fetchedAt) < WX_FRESH_MS)
-    return true;                                  // Data is still fresh
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[wx] WiFi nei");
-    return false;
-  }
-
-  WiFiClientSecure c;
-  c.setInsecure();                                // Sufficient for home IoT usage
-  c.setTimeout(10);
-  if (!c.connect(WX_HOST, 443)) {
-    Serial.println("[wx] connect holo na");
-    return false;
-  }
-
-  char path[220];
-  snprintf(path, sizeof(path),
-           "/v1/forecast?latitude=%.4f&longitude=%.4f"
-           "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
-           lat, lon);
-
-  c.printf("GET %s HTTP/1.1\r\n", path);
-  c.printf("Host: %s\r\n", WX_HOST);
-  c.print("Connection: close\r\n\r\n");
-
-  // Skip HTTP headers
-  uint32_t t0 = millis();
-  String line, body;
+bool readResponseBody(WiFiClientSecure &client, String &body) {
+  String line;
   bool inBody = false;
-  while (millis() - t0 < 12000) {
-    while (c.available()) {
-      char ch = (char)c.read();
-      t0 = millis();
+  int status = 0;
+  uint32_t lastData = millis();
+
+  while (millis() - lastData < 12000) {
+    while (client.available()) {
+      char c = (char)client.read();
+      lastData = millis();
       if (inBody) {
-        if (body.length() < 1500) body += ch;
-        continue;
-      }
-      if (ch == '\n') {
+        if (body.length() < 5000) body += c;
+      } else if (c == '\n') {
         line.trim();
-        if (line.length() == 0) { inBody = true; }
+        if (status == 0 && line.startsWith("HTTP/")) {
+          int firstSpace = line.indexOf(' ');
+          status = firstSpace >= 0 ? line.substring(firstSpace + 1).toInt() : 0;
+        }
+        if (line.length() == 0) inBody = true;
         line = "";
-      } else if (ch != '\r') {
-        if (line.length() < 200) line += ch;
+      } else if (c != '\r' && line.length() < 240) {
+        line += c;
       }
     }
-    if (!c.connected() && !c.available()) break;
-    delay(5);
+    if (!client.connected() && !client.available()) break;
+    delay(2);
   }
-  c.stop();
+  return status == 200 && body.length() > 20;
+}
 
-  if (body.length() < 20) {
-    Serial.println("[wx] khali uttor");
+}  // namespace
+
+bool weatherNeedsRefresh(uint32_t now) {
+  if (!cachedWeather.valid) {
+    return lastAttempt == 0 || (uint32_t)(now - lastAttempt) >= 60000UL;
+  }
+  return
+         (uint32_t)(now - cachedWeather.fetchedAt) >= WEATHER_REFRESH_MS;
+}
+
+bool weatherFetch(float latitude, float longitude, bool force) {
+  if (!force && !weatherNeedsRefresh(millis())) return true;
+  lastAttempt = millis();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[weather] Wi-Fi is unavailable; keeping cached values");
     return false;
   }
 
-  String cur = currentBlock(body);
-  float t, h, code, wind;
-  bool ok = numAfter(cur, "\"temperature_2m\"", t)
-         && numAfter(cur, "\"weather_code\"", code);
+  WiFiClientSecure client;
+  // Certificate pinning can be added later without changing the weather API.
+  client.setInsecure();
+  client.setTimeout(10);
+  if (!client.connect(WEATHER_HOST, 443)) {
+    Serial.println("[weather] HTTPS connection failed");
+    return false;
+  }
+
+  char path[640];
+  snprintf(path, sizeof(path),
+           "/v1/forecast?latitude=%.4f&longitude=%.4f"
+           "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m"
+           "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+           "&timezone=auto&forecast_days=1&temperature_unit=celsius"
+           "&wind_speed_unit=kmh&precipitation_unit=mm&timeformat=unixtime",
+           latitude, longitude);
+
+  client.printf("GET %s HTTP/1.1\r\n", path);
+  client.printf("Host: %s\r\n", WEATHER_HOST);
+  client.print("User-Agent: StudyMochi/2\r\nConnection: close\r\n\r\n");
+
+  String body;
+  bool responseOk = readResponseBody(client, body);
+  client.stop();
+  if (!responseOk) {
+    Serial.println("[weather] Open-Meteo returned an invalid response");
+    return false;
+  }
+
+  String current = objectFrom(body, "current");
+  String daily = objectFrom(body, "daily");
+  float temperature, apparent, humidity, isDay, code, wind;
+  float maximum, minimum, rain, offset;
+  bool ok = numberAfter(current, "\"temperature_2m\"", temperature) &&
+            numberAfter(current, "\"relative_humidity_2m\"", humidity) &&
+            numberAfter(current, "\"apparent_temperature\"", apparent) &&
+            numberAfter(current, "\"is_day\"", isDay) &&
+            numberAfter(current, "\"weather_code\"", code) &&
+            numberAfter(current, "\"wind_speed_10m\"", wind) &&
+            numberAfter(daily, "\"temperature_2m_max\"", maximum) &&
+            numberAfter(daily, "\"temperature_2m_min\"", minimum) &&
+            numberAfter(daily, "\"precipitation_probability_max\"", rain);
   if (!ok) {
-    Serial.print("[wx] bujhte parlam na: ");
-    Serial.println(body.substring(0, 160));
+    Serial.println("[weather] Required values were missing from the response");
     return false;
   }
-  gW.tempC = t;
-  gW.code  = (int)code;
-  gW.humidity = numAfter(cur, "\"relative_humidity_2m\"", h) ? (int)h : 0;
-  gW.windKmh  = numAfter(cur, "\"wind_speed_10m\"", wind) ? wind : 0;
-  gW.valid = true;
-  gW.fetchedAt = millis();
-  Serial.printf("[wx] %.1f C, %d%%, code %d\n", gW.tempC, gW.humidity, gW.code);
+
+  if (!numberAfter(body, "\"utc_offset_seconds\"", offset)) {
+    offset = cachedWeather.utcOffsetSeconds;
+  }
+
+  WeatherNow fresh;
+  fresh.temperatureC = temperature;
+  fresh.apparentC = apparent;
+  fresh.humidity = constrain((int)lroundf(humidity), 0, 100);
+  fresh.isDay = isDay >= 0.5f;
+  fresh.weatherCode = (int)lroundf(code);
+  fresh.windKmh = max(0.0f, wind);
+  fresh.maximumC = maximum;
+  fresh.minimumC = minimum;
+  fresh.rainProbability = constrain((int)lroundf(rain), 0, 100);
+  fresh.utcOffsetSeconds = (int)lroundf(offset);
+  fresh.valid = true;
+  fresh.fetchedAt = millis();
+  cachedWeather = fresh;
+
+  Serial.printf("[weather] %.1f C, feels %.1f C, humidity %d%%, WMO %d, offset %+d\n",
+                fresh.temperatureC, fresh.apparentC, fresh.humidity,
+                fresh.weatherCode, fresh.utcOffsetSeconds);
   return true;
 }
 
-WeatherNow weatherGet() { return gW; }
+WeatherNow weatherGet() {
+  return cachedWeather;
+}
 
-// WMO weather interpretation codes — https://open-meteo.com/en/docs
 const char *weatherBangla(int code) {
   switch (code) {
-    case 0:  return "পরিষ্কার আকাশ";
-    case 1:  return "প্রায় পরিষ্কার";
-    case 2:  return "আংশিক মেঘলা";
-    case 3:  return "মেঘলা";
+    case 0: return "পরিষ্কার";
+    case 1: return "প্রায় পরিষ্কার";
+    case 2: return "আংশিক মেঘলা";
+    case 3: return "মেঘলা";
     case 45: case 48: return "কুয়াশা";
-    case 51: case 53: case 55: return "ঝিরঝিরে বৃষ্টি";
+    case 51: case 53: case 55: return "গুঁড়ি বৃষ্টি";
     case 56: case 57: return "ঠান্ডা গুঁড়ি বৃষ্টি";
     case 61: return "হালকা বৃষ্টি";
     case 63: return "বৃষ্টি";
@@ -136,14 +186,11 @@ const char *weatherBangla(int code) {
   }
 }
 
-String weatherSentence(const WeatherNow &w) {
-  if (!w.valid) return "Abohawa-r khobor ekhono ani ni.";
-  // Since Mochi speaks Bengali, provide the prompt instruction in Romanized Bengali —
-  // Gemini Live API understands Romanized Bengali prompts reliably and responds in Bengali.
-  char s[220];
-  snprintf(s, sizeof(s),
-           "Ekhon baire %.0f degree, %s. Battash %.0f km/h, "
-           "battasher olo %d%%. Ei niye ek line-e amake bolo.",
-           w.tempC, weatherBangla(w.code), w.windKmh, w.humidity);
-  return String(s);
+String weatherSentence(const WeatherNow &weather) {
+  if (!weather.valid) return "আবহাওয়ার তথ্য এখনো পাওয়া যায়নি।";
+  String sentence = "এখন তাপমাত্রা " + String(weather.temperatureC, 0) +
+                    " ডিগ্রি সেলসিয়াস, " + weatherBangla(weather.weatherCode) +
+                    "। অনুভূত তাপমাত্রা " + String(weather.apparentC, 0) +
+                    " ডিগ্রি এবং আর্দ্রতা " + String(weather.humidity) + " শতাংশ।";
+  return sentence;
 }
