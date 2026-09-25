@@ -10,6 +10,7 @@
 
 enum MoodEvent {
   MOOD_EVT_PAT,           // Single soft tap (+10)
+  MOOD_EVT_SAD,           // Long head hold (-10 -> SAD)
   MOOD_EVT_CUDDLE,        // 2s head hold (+25)
   MOOD_EVT_RAPID_TAP,     // Head tapped repeatedly (-35 -> ANGRY)
   MOOD_EVT_POMO_COMPLETE, // Finished work round (+15)

@@ -8,6 +8,7 @@ enum MainMode : uint8_t {
   MODE_CLOCK = 0,
   MODE_TIMER = 1,
   MODE_AI = 2,
+  MODE_PET_POMO = 3,
   MAIN_MODE_COUNT
 };
 
@@ -20,9 +21,8 @@ enum SubClockMode : uint8_t {
 };
 
 enum SubTimerMode : uint8_t {
-  SUB_TIMER_POMO = 0,
-  SUB_TIMER_CUSTOM = 1,
-  SUB_TIMER_STOPWATCH = 2,
+  SUB_TIMER_CUSTOM = 0,
+  SUB_TIMER_STOPWATCH = 1,
   SUB_TIMER_COUNT
 };
 

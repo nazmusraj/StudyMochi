@@ -80,6 +80,19 @@ static const uint8_t FONT[] PROGMEM = {
 
 // ───────────────────── Screen Data ─────────────────────
 static FaceScreen gScreen = SCR_FACE;
+static uint8_t gPomoRotation = 0;
+
+static inline uint8_t activeRotation() {
+  return gScreen == SCR_POMO ? gPomoRotation : 0;
+}
+
+static inline int canvasWidth() {
+  return (activeRotation() & 1U) ? H : W;
+}
+
+static inline int canvasHeight() {
+  return (activeRotation() & 1U) ? W : H;
+}
 
 static struct { int h24, mi, se, day, mon, year, dow; bool ok; } gClk =
   {0,0,0,1,1,2026,0,false};
@@ -135,9 +148,29 @@ static void pushAll() { pushWindow(0, W - 1, 0, PAGES - 1); }
 
 // ───────────────────────── Drawing Primitives ─────────────────────────
 static inline void px(int x, int y, bool on) {
-  if (x < 0 || x >= W || y < 0 || y >= H) return;
-  uint8_t *b = &fb[(y >> 3) * W + x];
-  uint8_t  m = 1 << (y & 7);
+  if (x < 0 || x >= canvasWidth() || y < 0 || y >= canvasHeight()) return;
+
+  int physicalX = x;
+  int physicalY = y;
+  switch (activeRotation()) {
+    case 1: // Logical 64x128 canvas rotated clockwise into physical 128x64.
+      physicalX = W - 1 - y;
+      physicalY = x;
+      break;
+    case 2:
+      physicalX = W - 1 - x;
+      physicalY = H - 1 - y;
+      break;
+    case 3:
+      physicalX = y;
+      physicalY = H - 1 - x;
+      break;
+    default:
+      break;
+  }
+
+  uint8_t *b = &fb[(physicalY >> 3) * W + physicalX];
+  uint8_t  m = 1 << (physicalY & 7);
   if (on) *b |= m; else *b &= ~m;
 }
 
@@ -178,12 +211,12 @@ static void drawChar(int x, int y, char c) {
 }
 
 static void drawText(int x, int y, const char *s) {
-  while (*s && x < W - 5) { drawChar(x, y, *s++); x += 6; }
+  while (*s && x < canvasWidth() - 5) { drawChar(x, y, *s++); x += 6; }
 }
 
 static void drawTextCentered(int y, const char *s) {
   int n = strlen(s);
-  int x = (W - n * 6) / 2;
+  int x = (canvasWidth() - n * 6) / 2;
   if (x < 0) x = 0;
   drawText(x, y, s);
 }
@@ -228,7 +261,7 @@ static void bnNum(int x, int y, const char *s) {          // y = top edge
 }
 
 static void bnNumCentered(int y, const char *s) {
-  int x = (W - bnNumWidth(s)) / 2;
+  int x = (canvasWidth() - bnNumWidth(s)) / 2;
   if (x < 0) x = 0;
   bnNum(x, y, s);
 }
@@ -257,7 +290,7 @@ static void bnBig(int x, int y, const char *s) {
 }
 
 static void bnBigCentered(int y, const char *s) {
-  int x = (W - bnBigWidth(s)) / 2;
+  int x = (canvasWidth() - bnBigWidth(s)) / 2;
   if (x < 0) x = 0;
   bnBig(x, y, s);
 }
@@ -393,6 +426,7 @@ static EyeStyle eyeFor(FaceState s) {
     case FACE_SPEAKING:  return EYE_HAPPY;
     case FACE_WAITING:   return EYE_CRY;
     case FACE_ERROR:     return EYE_SQUINT;
+    case FACE_SAD:       return EYE_CRY;
     case FACE_CUDDLE:    return EYE_HEART;
     case FACE_ANGRY:     return EYE_ANGRY;
     case FACE_DIZZY:     return EYE_SPIRAL;
@@ -591,7 +625,8 @@ static void drawMouth(uint8_t step) {
       fillRect(mcx - 5, mcy - 2, 11, 5);
       break;
 
-    case FACE_WAITING:                            // Inverted curve — sad mouth
+    case FACE_WAITING:
+    case FACE_SAD:                                // Inverted curve — sad mouth
       for (int dx = -7; dx <= 7; dx++) {
         int y = mcy + (49 - dx * dx) / 18;
         px(mcx + dx, y, true); px(mcx + dx, y + 1, true);
@@ -776,11 +811,15 @@ static void drawWeatherToday() {
 }
 
 static void drawPomoScreen() {
+  const int cw = canvasWidth();
+  const bool portrait = (activeRotation() & 1U) != 0;
+
   // If in Break or Long Break phase (phase 2 or 3)
   if (gPomoExt.phase == 2 || gPomoExt.phase == 3 || gPomo.brk) {
-    drawBmp((W - BN_BIROTI_W) / 2, 0, BN_BIROTI, BN_BIROTI_W, BN_BIROTI_H);
+    drawBmp((cw - BN_BIROTI_W) / 2, portrait ? 4 : 0,
+            BN_BIROTI, BN_BIROTI_W, BN_BIROTI_H);
   } else {
-    drawBmp((W - BN_PORAR_SOMOY_W) / 2, 0, BN_PORAR_SOMOY,
+    drawBmp((cw - BN_PORAR_SOMOY_W) / 2, portrait ? 4 : 0, BN_PORAR_SOMOY,
             BN_PORAR_SOMOY_W, BN_PORAR_SOMOY_H);
   }
 
@@ -790,24 +829,30 @@ static void drawPomoScreen() {
   if (pm > 99) pm = 99;
   if (pm < 0) { pm = 0; ps = 0; }
   snprintf(t, sizeof(t), "%02d:%02d", pm, ps);
-  bnBigCentered(13, t);
+  bnBigCentered(portrait ? 34 : 13, t);
 
   // Progress bar
   int total = gPomoExt.totalSec > 0 ? gPomoExt.totalSec : (gPomo.brk ? 5 * 60 : 25 * 60);
   int left  = gPomoExt.secLeft;
-  int w = (W - 24) * (total - left) / total;
+  int barMargin = portrait ? 6 : 12;
+  int barWidth = cw - barMargin * 2;
+  int w = barWidth * (total - left) / total;
   if (w < 0) w = 0;
-  if (w > W - 24) w = W - 24;
-  fillRect(12, 37, W - 24, 1);
-  fillRect(12, 34, w, 6);
+  if (w > barWidth) w = barWidth;
+  fillRect(barMargin, portrait ? 70 : 37, barWidth, 1);
+  fillRect(barMargin, portrait ? 67 : 34, w, 6);
+
+  const int statusY = portrait ? 91 : 45;
+  const int labelY = portrait ? 94 : 47;
 
   if (gPomoExt.run || gPomo.run)
-    drawBmp((W - BN_CHOLCHHE_W) / 2, 45, BN_CHOLCHHE, BN_CHOLCHHE_W, BN_CHOLCHHE_H);
+    drawBmp((cw - BN_CHOLCHHE_W) / 2, statusY,
+            BN_CHOLCHHE, BN_CHOLCHHE_W, BN_CHOLCHHE_H);
   else if (gPomoExt.phase != POMO_PHASE_IDLE)
-    drawBmp((W - BN_THAMANO_W) / 2, 45, BN_THAMANO,
+    drawBmp((cw - BN_THAMANO_W) / 2, statusY, BN_THAMANO,
             BN_THAMANO_W, BN_THAMANO_H);
   else
-    bnNumCentered(47, gPomoExt.label);
+    bnNumCentered(labelY, gPomoExt.label);
 }
 
 static void drawStopwatchScreen() {
@@ -1085,6 +1130,13 @@ void faceNextScreen() {
 }
 
 void faceRedraw() { if (gOk) redrawAll(); }
+
+void faceSetPomoRotation(uint8_t quarterTurns) {
+  quarterTurns &= 3U;
+  if (quarterTurns == gPomoRotation) return;
+  gPomoRotation = quarterTurns;
+  if (gOk && gScreen == SCR_POMO) redrawAll();
+}
 
 void faceClockData(int h24, int mi, int se, int day, int mon, int year,
                    int dow, bool rtcOk) {

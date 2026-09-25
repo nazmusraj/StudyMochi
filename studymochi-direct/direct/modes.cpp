@@ -37,6 +37,10 @@ void ModeManager::refreshScreen() {
     faceSetScreen(SCR_FACE);
     return;
   }
+  if (_mainMode == MODE_PET_POMO) {
+    faceSetScreen(SCR_POMO);
+    return;
+  }
   if (_mainMode == MODE_CLOCK) {
     static const FaceScreen screens[SUB_CLOCK_COUNT] = {
       SCR_CLOCK, SCR_WEATHER_NOW, SCR_WEATHER_DETAILS, SCR_WEATHER_TODAY
@@ -45,7 +49,7 @@ void ModeManager::refreshScreen() {
     return;
   }
   static const FaceScreen timerScreens[SUB_TIMER_COUNT] = {
-    SCR_POMO, SCR_TIMER, SCR_STOPWATCH
+    SCR_TIMER, SCR_STOPWATCH
   };
   faceSetScreen(timerScreens[_subMode % SUB_TIMER_COUNT]);
 }

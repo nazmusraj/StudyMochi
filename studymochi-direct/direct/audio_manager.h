@@ -14,6 +14,7 @@ enum AudioPriority : uint8_t {
 
 enum PetSound : uint8_t {
   SOUND_HAPPY,
+  SOUND_SAD,
   SOUND_CUDDLE,
   SOUND_ANGRY,
   SOUND_SQUISH,
@@ -81,4 +82,3 @@ private:
 };
 
 extern AudioManager gAudio;
-

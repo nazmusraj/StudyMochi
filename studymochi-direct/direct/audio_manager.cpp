@@ -148,6 +148,8 @@ void AudioManager::loadTone(PetSound sound) {
   switch (sound) {
     case SOUND_HAPPY:
       add(740, 65, 6000); add(0, 25, 0); add(990, 90, 7000); break;
+    case SOUND_SAD:
+      add(370, 150, 4200); add(0, 35, 0); add(277, 240, 3600); break;
     case SOUND_CUDDLE:
       add(220, 130, 2800); add(260, 130, 3000); add(220, 150, 2500); break;
     case SOUND_ANGRY:
@@ -267,4 +269,3 @@ size_t AudioManager::writeAiPcm(uint8_t *pcm, size_t bytes,
 void AudioManager::endAiStream() {
   if (_kind == PLAY_AI) finish();
 }
-

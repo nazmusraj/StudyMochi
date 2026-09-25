@@ -35,6 +35,13 @@ void PetMood::triggerEvent(MoodEvent evt) {
       _reactionUntil = now + 2500;
       break;
 
+    case MOOD_EVT_SAD:
+      _score -= 10;
+      if (_score < -100) _score = -100;
+      _tempReaction = FACE_SAD;
+      _reactionUntil = now + 3000;
+      break;
+
     case MOOD_EVT_CUDDLE:
       _score += 25;
       if (_score > 100) _score = 100;

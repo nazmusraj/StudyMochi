@@ -16,7 +16,8 @@ diagnostics, tooling, and documentation are English.
 - DS3231 RTC with backup battery
 - MPU6050 IMU configured at address `0x69`
 - INMP441 I²S microphone
-- MAX98357A I²S amplifier and one 4-ohm, 3-watt speaker
+- MAX98357A I²S amplifier and one 8-ohm, 2-watt speaker
+- Passive piezo buzzer
 - 3.3 V logic-compatible microSD reader
 - Regulated 5 V, 2 A power supply
 
@@ -90,12 +91,22 @@ remain safe for the ESP32.
 
 | Function | Connection |
 |---|---|
-| Factory reset button | GPIO 4 to GND |
+| Passive buzzer signal | GPIO 5 |
+| Configuration/reset button | GPIO 4 to GND |
 | On-board BOOT input | GPIO 0 |
 | On-board status LED | GPIO 2 |
 
-Holding the GPIO 4 button for three seconds clears Wi-Fi and saved device
-configuration. The BOOT button remains a hold-to-talk backup in AI mode.
+For a small raw passive piezo buzzer, connect its positive pin to GPIO 5
+through a 100–220 Ω series resistor and its negative pin to GND. For a
+magnetic buzzer or any device drawing more than about 10 mA, drive it through
+an NPN transistor instead of powering it directly from the ESP32 pin. This
+firmware requires a passive buzzer; an active buzzer cannot reproduce the
+different pitches.
+
+A short GPIO 4 press opens the on-screen Wi-Fi/API setup portal without
+erasing saved settings. Holding it for three seconds clears Wi-Fi and saved
+device configuration, opens the same portal, and then restarts. The BOOT
+button remains a hold-to-talk backup in AI mode.
 
 ## Power recommendations
 
@@ -120,19 +131,18 @@ unless the particular DevKit provides safe power isolation.
 
 | Context | Short touch | Two-second hold |
 |---|---|---|
-| Clock/weather | Happy pet reaction | Cuddle reaction |
-| Pomodoro, stopped | Select next preset | Start |
-| Pomodoro, running/paused | Pet reaction | Pause or resume |
+| Clock/weather | No action | No action |
 | Normal timer, setting | Add five minutes | Start |
-| Normal timer, running/paused | Pet reaction | Pause or resume |
+| Normal timer, running/paused | No action | Pause or resume |
 | Stopwatch | Start or pause | Reset |
 | AI | Toggle microphone input | Toggle microphone input |
+| Pet Pomodoro | Happy reaction | Sad reaction |
 
-Three fast head taps trigger an angry reaction only in Clock mode. Rapid taps
-used for timer setup never trigger anger.
+Three fast head taps trigger an angry reaction only in Pet Pomodoro mode.
+Pet faces and pet sounds are disabled in every other mode.
 
-Pet reactions temporarily replace the content screen. Timers continue in the
-background, and the exact previous page returns after the animation.
+In Pet Pomodoro mode, pet reactions temporarily replace the timer screen. The
+timer continues in the background and returns after the animation.
 
 ### Modes and pages
 
@@ -142,12 +152,47 @@ background, and the exact previous page returns after the animation.
    - Weather details: feels-like temperature, humidity, and wind
    - Today's weather: maximum, minimum, and rain probability
 2. Timer
-   - Pomodoro presets: 25/5, 50/10, 15/3, and 90/20
    - Normal countdown in five-minute steps
    - Stopwatch
 3. AI
    - Gemini Live Bangla conversation
    - Touch-to-start and touch-to-stop microphone streaming
+4. Pet Pomodoro
+   - Six physical orientations select six Pomodoro profiles
+   - A stable placement starts a 10-second countdown, then starts automatically
+   - Moving to another stable face stops the current session and arms the new one
+   - Leaving the mode stops and resets the Pomodoro
+   - Head tap: happy; head hold: sad; three rapid taps: angry
+
+### Passive-buzzer feedback
+
+The GPIO 5 passive buzzer is independent of the MAX98357A speaker. It provides
+short non-blocking feedback without occupying the speech speaker:
+
+- A distinct pattern for each main-mode change
+- A click when changing a Clock or Timer subpage
+- Rising, falling, reset, and completion patterns for timers and stopwatch
+- Pomodoro orientation accepted, work start, break, and session-complete cues
+- Separate happy, angry, and sad patterns for the three pet reactions
+- AI listening-on, listening-off, and unavailable/error feedback
+
+For mode and Pomodoro announcements, the buzzer pattern plays first. After a
+short quiet gap, the MAX98357A plays the Bangla WAV announcement. They are not
+played simultaneously. Pet reactions use the buzzer only.
+
+Enter `b` in Serial Monitor to test only the passive buzzer. Enter `s` to test
+the MAX98357A speaker separately.
+
+### Pet Pomodoro orientations
+
+| Physical placement | MPU axis | Profile |
+|---|---|---|
+| Normal/upright | Z- | Classic 25/5 |
+| Right side | Y- | Deep Work 50/10 |
+| Back side | X+ | Sprint 15/3 |
+| Left side | Y+ | Extended 90/20 |
+| Front side | X- | Balanced 30/5 |
+| Upside down | Z+ | Focus 60/10 |
 
 Weather pages use three tiny dots as the page indicator. Each 128×64 screen
 contains one readable information group so Bengali glyphs do not overlap.
@@ -155,17 +200,23 @@ contains one readable information group so Bengali glyphs do not overlap.
 ## MPU6050 behavior
 
 - A new orientation must remain stable for 700 ms before it is accepted.
-- Four supported side orientations select Pomodoro presets while Pomodoro is
-  stopped. Running sessions cannot be changed by rotation.
+- All six calibrated resting faces select Pet Pomodoro profiles. A new stable
+  face resets the previous session and begins a fresh 10-second arming countdown.
+- The Pet Pomodoro timer page rotates with the accepted orientation. Side
+  placements use a dedicated portrait layout so the text remains horizontal
+  and fits the 128×64 display.
 - Face-down placement enables do-not-disturb: microphone input and audio stop,
-  and the OLED turns off while timers continue.
+  and the OLED turns off while timers continue. In Pet Pomodoro mode, face-down
+  is instead the sixth Pomodoro orientation and does not enable do-not-disturb.
 - Returning from face-down restores the previous page.
-- Side placement produces a soft squish sound.
-- A strong shake produces a temporary dizzy reaction with a cooldown.
+- Side placement and shaking do not trigger pet reactions.
 
 ## Time and weather
 
 The DS3231 is read immediately at boot, so the clock works without Wi-Fi.
+Startup never waits for Wi-Fi or opens the setup portal automatically; all
+offline modes become available immediately. Saved Wi-Fi credentials reconnect
+in the background.
 When Wi-Fi is available, background SNTP synchronization runs every ten
 minutes and writes the corrected local time back to the DS3231.
 
@@ -183,9 +234,9 @@ weather remains visible during a network outage.
 
 ## Audio and SD card
 
-DFPlayer is not used. Recorded announcements, generated pet tones, and Gemini
-audio all share the MAX98357A and the same speaker through one priority-aware
-audio manager.
+DFPlayer is not used. Recorded Bangla announcements and Gemini audio share the
+MAX98357A and speaker through one priority-aware audio manager. Pet reactions
+and interface cues use the separate passive buzzer on GPIO 5.
 
 Format the microSD card as FAT32 and copy the repository's `sdcard/audio`
 folder to the card root. The final card must contain:
@@ -200,7 +251,7 @@ folder to the card root. The final card must contain:
 ```
 
 All six files are 24 kHz, 16-bit, mono PCM WAV. Pet reactions are synthesized
-on the ESP32 and therefore require no additional files.
+for the passive buzzer and therefore require no additional files.
 
 Playback priority is timer alarm, Gemini output, recorded announcement, then
 pet feedback. A higher-priority event can interrupt a lower-priority event.
@@ -241,7 +292,9 @@ arduino-cli compile --fqbn esp32:esp32:esp32 studymochi-direct/direct
 arduino-cli upload --fqbn esp32:esp32:esp32 -p COM_PORT studymochi-direct/direct
 ```
 
-On first boot, connect a phone to:
+On first boot, StudyMochi starts normally in offline mode. Short-press the
+GPIO 4 configuration button when you want to configure online features. The
+OLED shows the setup screen; then connect a phone to:
 
 ```text
 SSID: StudyMochi-Direct

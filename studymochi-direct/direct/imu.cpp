@@ -5,7 +5,10 @@
 static uint8_t gImuAddr = MPU6050_ADDR;
 static bool gImuReady = false;
 
-static float gAx = 0, gAy = 0, gAz = 1.0f;
+// The installed sensor reads Z- when StudyMochi is in its normal upright
+// position.  Start the filter at that calibrated resting vector so boot does
+// not briefly look like a face-down placement.
+static float gAx = 0, gAy = 0, gAz = -1.0f;
 static float gRoll = 0, gPitch = 0;
 static OrientFace gCurrentOrient = ORIENT_UPRIGHT;
 static OrientFace gStableOrient = ORIENT_UPRIGHT;
@@ -111,20 +114,20 @@ void imuUpdate(uint32_t now) {
     }
   }
 
-  // Determine candidate orientation face
-  OrientFace candidate = ORIENT_UPRIGHT;
-  if (gAz < -0.65f) {
-    candidate = ORIENT_UPSIDE_DOWN;
-  } else if (gAy > 0.55f) {
-    candidate = ORIENT_TILT_RIGHT;
-  } else if (gAy < -0.55f) {
-    candidate = ORIENT_TILT_LEFT;
-  } else if (gAx < -0.55f) {
-    candidate = ORIENT_TILT_FRONT;
-  } else if (gAx > 0.55f) {
-    candidate = ORIENT_TILT_BACK;
+  // Determine the face carrying gravity from the dominant calibrated axis:
+  //   normal Z-, upside-down Z+, right Y-, left Y+, front X-, back X+.
+  // Dominant-axis selection remains unambiguous near each resting face; the
+  // stability timer below rejects the intermediate faces seen while rotating.
+  float absX = fabsf(gAx);
+  float absY = fabsf(gAy);
+  float absZ = fabsf(gAz);
+  OrientFace candidate;
+  if (absZ >= absX && absZ >= absY) {
+    candidate = gAz < 0.0f ? ORIENT_UPRIGHT : ORIENT_UPSIDE_DOWN;
+  } else if (absY >= absX && absY >= absZ) {
+    candidate = gAy < 0.0f ? ORIENT_TILT_RIGHT : ORIENT_TILT_LEFT;
   } else {
-    candidate = ORIENT_UPRIGHT;
+    candidate = gAx < 0.0f ? ORIENT_TILT_FRONT : ORIENT_TILT_BACK;
   }
 
   // Require a deliberate placement, not a brief hand movement.
@@ -150,15 +153,21 @@ bool imuTookOrientationChange(OrientFace &newFace) {
   return false;
 }
 
-// Maps 4 horizontal orientations to Pomodoro preset indices (0..3)
-int imuGetPomoPresetIndex() {
-  switch (gStableOrient) {
+// Maps all six calibrated resting faces to Pomodoro preset indices (0..5).
+int imuGetPomoPresetIndex(OrientFace face) {
+  switch (face) {
     case ORIENT_UPRIGHT:    return 0; // Preset 1 (Classic 25-5)
     case ORIENT_TILT_RIGHT: return 1; // Preset 2 (Deep Work 50-10)
     case ORIENT_TILT_BACK:  return 2; // Preset 3 (Sprint 15-3)
     case ORIENT_TILT_LEFT:  return 3; // Preset 4 (Ultradian 90-20)
+    case ORIENT_TILT_FRONT: return 4; // Preset 5 (Balanced 30-5)
+    case ORIENT_UPSIDE_DOWN:return 5; // Preset 6 (Focus 60-10)
     default:                return 0;
   }
+}
+
+int imuGetPomoPresetIndex() {
+  return imuGetPomoPresetIndex(gStableOrient);
 }
 
 int imuSquishOffsetX() { return gSquishX; }

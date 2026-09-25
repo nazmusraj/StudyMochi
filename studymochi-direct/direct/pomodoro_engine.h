@@ -2,7 +2,7 @@
 //   Extensible Pomodoro Engine for StudyMochi
 //
 //   Allows adding any custom Pomodoro preset.
-//   Supports 4-orientation switching, work/break/long-break cycles,
+//   Supports 6-orientation switching, work/break/long-break cycles,
 //   and phase transition events.
 // ════════════════════════════════════════════════════════════════
 #pragma once
@@ -28,12 +28,14 @@ struct PomoProfile {
   uint8_t     roundsBeforeLong; // Completed work rounds before long break
 };
 
-// ── Default 4 Popular Presets (can be expanded) ──
+// Profile order matches the six calibrated StudyMochi resting faces.
 static const PomoProfile POMO_PROFILES[] = {
   { "CLASSIC",   "25-5",  "Classic",   25 * 60,  5 * 60, 15 * 60, 4 },
   { "DEEP",      "50-10", "Deep Work", 50 * 60, 10 * 60, 20 * 60, 4 },
   { "SPRINT",    "15-3",  "Sprint",    15 * 60,  3 * 60, 10 * 60, 4 },
   { "ULTRADIAN", "90-20", "Extended",  90 * 60, 20 * 60, 30 * 60, 3 },
+  { "BALANCED",  "30-5",  "Balanced",  30 * 60,  5 * 60, 15 * 60, 4 },
+  { "FOCUS",     "60-10", "Focus",     60 * 60, 10 * 60, 20 * 60, 4 },
 };
 static const int POMO_NUM_PROFILES = sizeof(POMO_PROFILES) / sizeof(POMO_PROFILES[0]);
 

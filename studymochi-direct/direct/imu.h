@@ -30,7 +30,8 @@ void imuUpdate(uint32_t now);
 // Orientation queries
 OrientFace imuGetOrientation();
 bool imuTookOrientationChange(OrientFace &newFace);
-int  imuGetPomoPresetIndex(); // Maps orientation directly to preset 0..3
+int  imuGetPomoPresetIndex(); // Maps the stable face to preset 0..5
+int  imuGetPomoPresetIndex(OrientFace face);
 
 // Squish physics queries (returns pixel shift for OLED face deformation)
 int  imuSquishOffsetX(); // Negative = squish left, Positive = squish right (-24 to +24 px)

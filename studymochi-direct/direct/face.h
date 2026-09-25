@@ -33,6 +33,7 @@ enum FaceState {
   // Kawaii Pet & Emotion States
   FACE_NEUTRAL,     // Content baseline
   FACE_HAPPY,       // Sweet smile + blush
+  FACE_SAD,         // Crying eyes + downturned mouth
   FACE_CUDDLE,      // Heart eyes + purring blush
   FACE_ANGRY,       // Furious / rapid tap reaction (X or jagged eyes)
   FACE_DIZZY,       // Shaken / spiral eyes
@@ -71,6 +72,11 @@ void       faceSetScreen(FaceScreen s);
 FaceScreen faceScreen();
 void       faceNextScreen();
 void       faceRedraw();
+
+// Rotate only the Pet Pomodoro information page. Quarter turns are clockwise
+// in the OLED framebuffer (0, 1, 2, or 3). Portrait rotations use a dedicated
+// 64x128 layout so text is not clipped.
+void       faceSetPomoRotation(uint8_t quarterTurns);
 
 // Squish physics: set pixel displacement from IMU tilt
 void       faceSetSquish(int offX, int offY);

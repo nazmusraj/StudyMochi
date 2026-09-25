@@ -40,6 +40,8 @@ CompileFlags:
     - -IC:/Users/nazmu/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Update/src
     - -IC:/Users/nazmu/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/WebServer/src
     - -IC:/Users/nazmu/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/FS/src
+    - -isystemC:/Users/nazmu/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/SD/src
+    - -isystemC:/Users/nazmu/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/SPI/src
     - -IC:/Users/nazmu/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/DNSServer/src
     - -IC:/Users/nazmu/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/AsyncUDP/src
     - -IC:/Users/nazmu/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Hash/src
