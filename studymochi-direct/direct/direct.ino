@@ -44,9 +44,11 @@ static int gTouchNormalPin = TOUCH_NORMAL_PIN;
 static int gTouchVoicePin = TOUCH_VOICE_PIN;
 
 // ───── Timer ─────
-#define TMR_STEP_MIN 5 // Minutes added per tap
-#define TMR_MAX_MIN 60 // Reset threshold (exceeding rolls back to 0)
-#define TMR_SET_WAIT_MS 3000
+#define TMR_STEP_MIN 5 // Minutes added per long head touch
+#define TMR_MAX_MIN 60 // After 60 minutes, the next change wraps to 5
+#define TIMER_RESET_TAP_COUNT 3
+#define TIMER_TAP_WINDOW_MS 1500UL
+#define TIMER_TAP_SETTLE_MS 550UL
 
 // ───── Six-face Pomodoro ─────
 #define ORIENT_POMO_ARM_MS 10000UL
@@ -163,6 +165,9 @@ static uint32_t gOrientPomoStartsAt = 0;
 static uint8_t gHeadPetTapCount = 0;
 static uint32_t gHeadPetFirstTapAt = 0;
 static uint32_t gHeadPetLastTapAt = 0;
+static uint8_t gHeadTimerTapCount = 0;
+static uint32_t gHeadTimerFirstTapAt = 0;
+static uint32_t gHeadTimerLastTapAt = 0;
 
 // Buzzer cues finish before a Bangla announcement starts. This keeps the
 // notification and speech clear instead of playing both at the same time.
@@ -966,12 +971,15 @@ static void showHelp() {
       "   GPIO %d (Other/Head)   : AI mode-e chepe dhorle kotha bola\n",
       gTouchVoicePin);
   Serial.println(
-      "                             Pet-Pomo: 1 tap happy, 3 taps angry");
+      "                             Pet-Pomo: 1 tap angry, 3 taps happy");
   Serial.println(
       "                             Pet-Pomo: 2s hold sad");
   Serial.println(
-      "                             Timer: countdown / stopwatch controls");
+      "                             Timer: 1 tap start/stop, hold +5 min,");
+  Serial.println(
+      "                                    3 taps reset to zero");
   Serial.println("   s + ENTER   : speaker beep — tar thik achhe ki");
+  Serial.println("   a + ENTER   : microSD announcement test");
   Serial.println("   b + ENTER   : GPIO 5 passive buzzer test");
   Serial.println("   v <0-100>   : speaker volume (blurry hole koman)");
   Serial.println("   t <proshno> : mic chhara likhe proshno korun");
@@ -1071,6 +1079,13 @@ static void checkSerialCmd() {
     return;
   }
 
+  if (c == 'a' || c == 'A') {
+    Serial.println("[test] playing an announcement from the microSD card");
+    if (!gAudio.playWav(AUDIO_CLOCK_MODE, AUDIO_PRIORITY_ALARM))
+      Serial.println("[test] SD announcement failed; check the [audio] message above");
+    return;
+  }
+
   if (c == 'b' || c == 'B') {
     Serial.println("[test] playing the passive buzzer pattern on GPIO 5");
     gBuzzer.play(BUZZ_BOOT);
@@ -1132,8 +1147,10 @@ static void checkSerialCmd() {
     Serial.printf("  API key  : %s\n", strlen(gApiKey) > 10 ? "achhe" : "NEI");
     Serial.printf("  session  : %s\n",
                   ws.connected() ? (gReady ? "ready" : "khulche") : "bondho");
-    Serial.printf("  mic/amp  : %s / %s\n", gMicOk ? "OK" : "BYARTHO",
-                  gAmpOk ? "OK" : "BYARTHO");
+    Serial.printf("  mic/amp/SD: %s / %s / %s\n",
+                  gMicOk ? "OK" : "BYARTHO",
+                  gAmpOk ? "OK" : "BYARTHO",
+                  gAudio.sdReady() ? "OK" : "BYARTHO");
     Serial.printf("  sesh turn: %u ms pathano, mic peak %d, raw peak %d\n",
                   (unsigned)gSentMs, (int)gPeak, (int)gRawPeak);
     Serial.printf("  mic gain : %d\n", (int)gGain);
@@ -1287,6 +1304,9 @@ static void tmrClear() {
   gTmrLeft = gTmrTotal = gTmrSetMin = 0;
   gTmrAlerted = false;
   gTmrBlinkOn = true;
+  gHeadTimerTapCount = 0;
+  gHeadTimerFirstTapAt = 0;
+  gHeadTimerLastTapAt = 0;
   tmrPush();
 }
 
@@ -1325,67 +1345,59 @@ static void tmrTick(uint32_t now) {
   tmrPush();
 }
 
-// Single tap on Timer screen — manages all timer states
-static void tmrTap(uint32_t now) {
-  switch (gTmrMode) {
-  case TM_IDLE:
-    gTmrMode = TM_SET;
-    gTmrSetMin = TMR_STEP_MIN;
-    gTmrTick = now;
-    Serial.printf("[timer] bosachhi — %d minute\n", gTmrSetMin);
-    break;
-
-  case TM_SET:
-    // 5 -> 10 -> ... -> 60 -> 0 (0 cancels timer)
-    gTmrSetMin += TMR_STEP_MIN;
-    if (gTmrSetMin > TMR_MAX_MIN)
-      gTmrSetMin = 0;
-    gTmrTick = now;
-    if (gTmrSetMin == 0) {
-      Serial.println("[timer] bad dilam");
-      gTmrMode = TM_IDLE;
-    } else {
-      Serial.printf("[timer] %d minute\n", gTmrSetMin);
-    }
-    break;
-
-  case TM_RUN:
-  case TM_PAUSE:
-    return;
-
-  case TM_DONE:
-    gAudio.stop();
-    tmrClear();
-    gBuzzer.play(BUZZ_RESET);
-    Serial.println("[timer] muchhe dilam");
-    return;
-  }
-  gBuzzer.play(BUZZ_CLICK);
-  tmrPush();
+static void resetHeadTimerTaps() {
+  gHeadTimerTapCount = 0;
+  gHeadTimerFirstTapAt = 0;
+  gHeadTimerLastTapAt = 0;
 }
 
-static void tmrHold(uint32_t now) {
+// A long head touch selects the next duration. Changing the duration while a
+// countdown is active stops that run and returns to the setting screen.
+static void tmrChangeAmount(uint32_t now) {
+  int minutes = gTmrMode == TM_SET ? gTmrSetMin : gTmrTotal / 60;
+  minutes += TMR_STEP_MIN;
+  if (minutes > TMR_MAX_MIN)
+    minutes = TMR_STEP_MIN;
+
+  gAudio.stop();
+  gTmrMode = TM_SET;
+  gTmrSetMin = minutes;
+  gTmrTotal = minutes * 60;
+  gTmrLeft = gTmrTotal;
+  gTmrTick = now;
+  gTmrAlerted = false;
+  gTmrBlinkOn = true;
+  gBuzzer.play(BUZZ_CLICK);
+  tmrPush();
+  Serial.printf("[timer] amount changed to %d minute\n", minutes);
+}
+
+// A settled single tap starts, pauses, or resumes the countdown.
+static void tmrToggle(uint32_t now) {
   switch (gTmrMode) {
   case TM_IDLE:
-    gTmrSetMin = TMR_STEP_MIN;
-    tmrStart(gTmrSetMin);
+    gBuzzer.play(BUZZ_ERROR);
+    Serial.println("[timer] set an amount with a long touch first");
     return;
+
   case TM_SET:
     tmrStart(gTmrSetMin > 0 ? gTmrSetMin : TMR_STEP_MIN);
     return;
+
   case TM_RUN:
     gTmrMode = TM_PAUSE;
     gBuzzer.play(BUZZ_PAUSE);
     break;
+
   case TM_PAUSE:
     gTmrMode = TM_RUN;
     gTmrTick = now;
     gBuzzer.play(BUZZ_START);
     break;
+
   case TM_DONE:
     gAudio.stop();
-    tmrClear();
-    gBuzzer.play(BUZZ_RESET);
+    tmrStart(gTmrTotal > 0 ? gTmrTotal / 60 : TMR_STEP_MIN);
     return;
   }
   tmrPush();
@@ -1425,6 +1437,8 @@ static void queueWavAfterBuzzer(const char *path, AudioPriority priority,
   gPendingBuzzerWav.expectedMode = expectedMode;
   gPendingBuzzerWav.quietSince = 0;
   gPendingBuzzerWav.active = path != nullptr;
+  if (gPendingBuzzerWav.active)
+    Serial.printf("[audio] queued after buzzer: %s\n", path);
 }
 
 static void updateBuzzerWav(uint32_t now) {
@@ -1461,6 +1475,15 @@ static void stopOrientationPomodoro() {
   gHeadPetTapCount = 0;
   gHeadPetFirstTapAt = 0;
   gHeadPetLastTapAt = 0;
+}
+
+static void stopAllTimersForFaceDown() {
+  stopOrientationPomodoro();
+  tmrClear();
+  gStopwatch.reset();
+  gPetOverlay = false;
+  gAudio.stop();
+  cancelBuzzerWav();
 }
 
 static uint8_t pomoDisplayRotation(OrientFace orientation) {
@@ -1572,6 +1595,7 @@ static void handleTouchEvents(uint32_t now) {
   bool topTap = tVoice.tookTap();
 
   if (sideHold) {
+    resetHeadTimerTaps();
     MainMode previousMode = gModes.currentMainMode();
     stopAiInput();
     gAudio.stop();
@@ -1584,10 +1608,16 @@ static void handleTouchEvents(uint32_t now) {
     MainMode newMode = gModes.currentMainMode();
 
     if (newMode == MODE_PET_POMO) {
-      gFaceDownDnd = false;
-      gBuzzer.setEnabled(true);
-      faceSetDisplayEnabled(true);
-      armOrientationPomodoro(imuGetOrientation(), now);
+      gFaceDownDnd = imuGetOrientation() == ORIENT_UPSIDE_DOWN;
+      if (gFaceDownDnd) {
+        stopAllTimersForFaceDown();
+        gBuzzer.setEnabled(false);
+        faceSetDisplayEnabled(false);
+      } else {
+        gBuzzer.setEnabled(true);
+        faceSetDisplayEnabled(true);
+        armOrientationPomodoro(imuGetOrientation(), now);
+      }
     } else {
       gFaceDownDnd = imuGetOrientation() == ORIENT_UPSIDE_DOWN;
       gBuzzer.setEnabled(!gFaceDownDnd);
@@ -1609,6 +1639,7 @@ static void handleTouchEvents(uint32_t now) {
   }
 
   if (sideTap) {
+    resetHeadTimerTaps();
     if (gModes.isAiMode()) {
       stopAiInput();
       gAudio.stop();
@@ -1647,16 +1678,16 @@ static void handleTouchEvents(uint32_t now) {
         gHeadPetTapCount = 0;
         gHeadPetFirstTapAt = 0;
         gHeadPetLastTapAt = 0;
-        showPetReaction(MOOD_EVT_RAPID_TAP, FACE_ANGRY, BUZZ_ANGRY, 3000);
+        showPetReaction(MOOD_EVT_PAT, FACE_HAPPY, BUZZ_HAPPY, 2200);
       }
     } else if (gHeadPetTapCount > 0 &&
                now - gHeadPetLastTapAt >= PET_TAP_SETTLE_MS) {
       // Delay the single-tap response briefly so three rapid taps produce only
-      // the angry reaction instead of two happy reactions followed by anger.
+      // the happy reaction instead of angry reactions followed by happiness.
       gHeadPetTapCount = 0;
       gHeadPetFirstTapAt = 0;
       gHeadPetLastTapAt = 0;
-      showPetReaction(MOOD_EVT_PAT, FACE_HAPPY, BUZZ_HAPPY, 2200);
+      showPetReaction(MOOD_EVT_RAPID_TAP, FACE_ANGRY, BUZZ_ANGRY, 3000);
     }
     return;
   }
@@ -1669,13 +1700,35 @@ static void handleTouchEvents(uint32_t now) {
   if (gModes.currentMainMode() == MODE_TIMER) {
     uint8_t subMode = gModes.currentSubMode();
     if (subMode == SUB_TIMER_CUSTOM) {
-      if (topHold)
-        tmrHold(now);
-      else if (topTap &&
-               (gTmrMode == TM_IDLE || gTmrMode == TM_SET ||
-                gTmrMode == TM_DONE))
-        tmrTap(now);
+      if (topHold) {
+        resetHeadTimerTaps();
+        tmrChangeAmount(now);
+      } else if (topTap) {
+        if (gHeadTimerTapCount == 0 ||
+            now - gHeadTimerFirstTapAt > TIMER_TAP_WINDOW_MS) {
+          gHeadTimerTapCount = 1;
+          gHeadTimerFirstTapAt = now;
+        } else {
+          gHeadTimerTapCount++;
+        }
+        gHeadTimerLastTapAt = now;
+
+        if (gHeadTimerTapCount >= TIMER_RESET_TAP_COUNT) {
+          resetHeadTimerTaps();
+          gAudio.stop();
+          tmrClear();
+          gBuzzer.play(BUZZ_RESET);
+          Serial.println("[timer] three taps: reset to zero");
+        }
+      } else if (gHeadTimerTapCount > 0 &&
+                 now - gHeadTimerLastTapAt >= TIMER_TAP_SETTLE_MS) {
+        uint8_t tapCount = gHeadTimerTapCount;
+        resetHeadTimerTaps();
+        if (tapCount == 1)
+          tmrToggle(now);
+      }
     } else {
+      resetHeadTimerTaps();
       if (topHold) {
         gStopwatch.reset();
         gBuzzer.play(BUZZ_RESET);
@@ -1714,11 +1767,19 @@ static void handleImuEvents(uint32_t now) {
   OrientFace orientation;
   if (imuTookOrientationChange(orientation)) {
     if (gModes.currentMainMode() == MODE_PET_POMO) {
-      // All six faces are valid presets here, including the physical
-      // upside-down face that acts as DND everywhere else.
-      gFaceDownDnd = false;
-      faceSetDisplayEnabled(true);
-      armOrientationPomodoro(orientation, now);
+      bool nowFaceDown = orientation == ORIENT_UPSIDE_DOWN;
+      if (nowFaceDown) {
+        gFaceDownDnd = true;
+        stopAllTimersForFaceDown();
+        gBuzzer.setEnabled(false);
+        faceSetDisplayEnabled(false);
+        Serial.println("[orient-pomo] display down: all timers stopped");
+      } else {
+        gFaceDownDnd = false;
+        gBuzzer.setEnabled(true);
+        faceSetDisplayEnabled(true);
+        armOrientationPomodoro(orientation, now);
+      }
     } else {
       bool nowFaceDown = orientation == ORIENT_UPSIDE_DOWN;
       if (nowFaceDown != gFaceDownDnd) {

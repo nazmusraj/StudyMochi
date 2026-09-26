@@ -2,7 +2,7 @@
 
 StudyMochi is a Bengali-language desk companion built around an ESP32 and a
 128×64 monochrome OLED. It combines a clock, three-page weather view,
-Pomodoro timer, normal countdown timer, stopwatch, pet reactions, six-face
+Pomodoro timer, normal countdown timer, stopwatch, pet reactions, orientation
 MPU6050 interactions, and a Gemini Live voice assistant.
 
 All device-facing text and recorded speech are Bangla. Source comments,
@@ -132,13 +132,13 @@ unless the particular DevKit provides safe power isolation.
 | Context | Short touch | Two-second hold |
 |---|---|---|
 | Clock/weather | No action | No action |
-| Normal timer, setting | Add five minutes | Start |
-| Normal timer, running/paused | No action | Pause or resume |
+| Normal timer | Start, pause, or resume | Add five minutes |
 | Stopwatch | Start or pause | Reset |
 | AI | Toggle microphone input | Toggle microphone input |
-| Pet Pomodoro | Happy reaction | Sad reaction |
+| Pet Pomodoro | Angry reaction | Sad reaction |
 
-Three fast head taps trigger an angry reaction only in Pet Pomodoro mode.
+Three fast head taps trigger a happy reaction only in Pet Pomodoro mode.
+On the normal countdown page, three fast head taps reset the timer to zero.
 Pet faces and pet sounds are disabled in every other mode.
 
 In Pet Pomodoro mode, pet reactions temporarily replace the timer screen. The
@@ -158,11 +158,12 @@ timer continues in the background and returns after the animation.
    - Gemini Live Bangla conversation
    - Touch-to-start and touch-to-stop microphone streaming
 4. Pet Pomodoro
-   - Six physical orientations select six Pomodoro profiles
+   - Five active physical orientations select five Pomodoro profiles
+   - Placing the OLED/display downward stops and resets every timer
    - A stable placement starts a 10-second countdown, then starts automatically
    - Moving to another stable face stops the current session and arms the new one
    - Leaving the mode stops and resets the Pomodoro
-   - Head tap: happy; head hold: sad; three rapid taps: angry
+   - Head tap: angry; head hold: sad; three rapid taps: happy
 
 ### Passive-buzzer feedback
 
@@ -181,7 +182,7 @@ short quiet gap, the MAX98357A plays the Bangla WAV announcement. They are not
 played simultaneously. Pet reactions use the buzzer only.
 
 Enter `b` in Serial Monitor to test only the passive buzzer. Enter `s` to test
-the MAX98357A speaker separately.
+the MAX98357A speaker and `a` to play a WAV directly from the microSD card.
 
 ### Pet Pomodoro orientations
 
@@ -192,7 +193,7 @@ the MAX98357A speaker separately.
 | Back side | X+ | Sprint 15/3 |
 | Left side | Y+ | Extended 90/20 |
 | Front side | X- | Balanced 30/5 |
-| Upside down | Z+ | Focus 60/10 |
+| Display/OLED down | Z+ | Stop/reset all timers; screen and audio off |
 
 Weather pages use three tiny dots as the page indicator. Each 128×64 screen
 contains one readable information group so Bengali glyphs do not overlap.
@@ -200,14 +201,14 @@ contains one readable information group so Bengali glyphs do not overlap.
 ## MPU6050 behavior
 
 - A new orientation must remain stable for 700 ms before it is accepted.
-- All six calibrated resting faces select Pet Pomodoro profiles. A new stable
+- Five active calibrated resting faces select Pet Pomodoro profiles. A new stable
   face resets the previous session and begins a fresh 10-second arming countdown.
 - The Pet Pomodoro timer page rotates with the accepted orientation. Side
   placements use a dedicated portrait layout so the text remains horizontal
   and fits the 128×64 display.
 - Face-down placement enables do-not-disturb: microphone input and audio stop,
-  and the OLED turns off while timers continue. In Pet Pomodoro mode, face-down
-  is instead the sixth Pomodoro orientation and does not enable do-not-disturb.
+  and the OLED turns off. In Pet Pomodoro mode it also stops and resets the
+  Pomodoro, normal countdown, and stopwatch.
 - Returning from face-down restores the previous page.
 - Side placement and shaking do not trigger pet reactions.
 
@@ -252,6 +253,10 @@ folder to the card root. The final card must contain:
 
 All six files are 24 kHz, 16-bit, mono PCM WAV. Pet reactions are synthesized
 for the passive buzzer and therefore require no additional files.
+
+In Serial Monitor, `i` reports microphone, amplifier, and SD-card status; `s`
+tests synthesized MAX98357A output, and `a` directly plays the Clock-mode WAV
+from the SD card. Boot logs also name any required audio file that is missing.
 
 Playback priority is timer alarm, Gemini output, recorded announcement, then
 pet feedback. A higher-priority event can interrupt a lower-priority event.

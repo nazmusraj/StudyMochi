@@ -10,6 +10,15 @@ AudioManager gAudio;
 
 namespace {
 
+struct WavInfo {
+  uint16_t encoding = 0;
+  uint16_t channels = 0;
+  uint32_t sampleRate = 0;
+  uint16_t bits = 0;
+  uint32_t dataPosition = 0;
+  uint32_t dataSize = 0;
+};
+
 uint16_t readLe16(File &file) {
   uint8_t b[2];
   if (file.read(b, sizeof(b)) != sizeof(b)) return 0;
@@ -27,6 +36,87 @@ bool readTag(File &file, const char expected[4]) {
   char tag[4];
   return file.read((uint8_t *)tag, sizeof(tag)) == sizeof(tag) &&
          memcmp(tag, expected, sizeof(tag)) == 0;
+}
+
+const char *baseName(const char *path) {
+  const char *name = path;
+  for (const char *p = path; *p; ++p) {
+    if (*p == '/' || *p == '\\') name = p + 1;
+  }
+  return name;
+}
+
+bool sameFileName(const char *path, const char *wanted) {
+  const char *a = baseName(path);
+  const char *b = baseName(wanted);
+  while (*a && *b) {
+    char ca = *a >= 'A' && *a <= 'Z' ? *a - 'A' + 'a' : *a;
+    char cb = *b >= 'A' && *b <= 'Z' ? *b - 'A' + 'a' : *b;
+    if (ca != cb) return false;
+    ++a;
+    ++b;
+  }
+  return *a == 0 && *b == 0;
+}
+
+// The standalone SD test scans the entire card, so it succeeds even when the
+// user copied the WAVs to the root or accidentally kept an extra sdcard/
+// directory. Preserve the documented /audio path, but find the same filename
+// elsewhere as a recovery path.
+bool findFileRecursive(File &directory, const char *wanted, File &found,
+                       uint8_t depth) {
+  if (!directory || !directory.isDirectory()) return false;
+  directory.rewindDirectory();
+
+  while (true) {
+    File entry = directory.openNextFile();
+    if (!entry) break;
+
+    if (entry.isDirectory()) {
+      if (depth > 0 && findFileRecursive(entry, wanted, found, depth - 1))
+        return true;
+    } else if (sameFileName(entry.name(), wanted)) {
+      found = entry;
+      return true;
+    }
+    entry.close();
+  }
+  return false;
+}
+
+bool readWavHeader(File &file, WavInfo &wav) {
+  if (!file.seek(0) || !readTag(file, "RIFF")) return false;
+  (void)readLe32(file);
+  if (!readTag(file, "WAVE")) return false;
+
+  bool foundFormat = false;
+  bool foundData = false;
+  while (file.available()) {
+    char chunk[4];
+    if (file.read((uint8_t *)chunk, sizeof(chunk)) != sizeof(chunk)) break;
+    uint32_t chunkSize = readLe32(file);
+    uint32_t chunkStart = file.position();
+    uint32_t next = chunkStart + chunkSize + (chunkSize & 1U);
+
+    if (memcmp(chunk, "fmt ", 4) == 0 && chunkSize >= 16) {
+      wav.encoding = readLe16(file);
+      wav.channels = readLe16(file);
+      wav.sampleRate = readLe32(file);
+      (void)readLe32(file);  // Byte rate
+      (void)readLe16(file);  // Block alignment
+      wav.bits = readLe16(file);
+      foundFormat = true;
+    } else if (memcmp(chunk, "data", 4) == 0) {
+      wav.dataPosition = chunkStart;
+      wav.dataSize = chunkSize;
+      foundData = true;
+    }
+
+    if (foundFormat && foundData)
+      return file.seek(wav.dataPosition);
+    if (!file.seek(next)) break;
+  }
+  return false;
 }
 
 }  // namespace
@@ -59,11 +149,26 @@ bool AudioManager::begin(i2s_port_t port) {
   if (_ampReady) i2s_zero_dma_buffer(_port);
 
   SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-  _sdReady = SD.begin(PIN_SD_CS, SPI, 10000000);
+  // Breadboard wiring and some microSD adapters are unreliable at 10 MHz.
+  // Start at 4 MHz and retry at the initialization-safe 1 MHz rate.
+  _sdReady = SD.begin(PIN_SD_CS, SPI, 4000000);
+  if (!_sdReady) {
+    SD.end();
+    _sdReady = SD.begin(PIN_SD_CS, SPI, 1000000);
+  }
 
   Serial.printf("[audio] amplifier=%s, microSD=%s\n",
                 _ampReady ? "ready" : "failed",
                 _sdReady ? "ready" : "not found");
+  if (_sdReady) {
+    const char *required[] = {
+        AUDIO_POMO_START, AUDIO_BREAK_START, AUDIO_SESSION_DONE,
+        AUDIO_CLOCK_MODE, AUDIO_TIMER_MODE, AUDIO_AI_MODE};
+    for (const char *path : required) {
+      if (!SD.exists(path))
+        Serial.printf("[audio] missing required file: %s\n", path);
+    }
+  }
   return _ampReady;
 }
 
@@ -78,9 +183,15 @@ bool AudioManager::claim(AudioPriority priority, PlayKind kind) {
 
 void AudioManager::finish() {
   if (_file) _file.close();
+  if (_wavSampleRate != 0 && _wavSampleRate != SPEAKER_SAMPLE_RATE &&
+      _ampReady) {
+    i2s_set_clk(_port, SPEAKER_SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT,
+                I2S_CHANNEL_MONO);
+  }
   _kind = PLAY_NONE;
   _priority = AUDIO_PRIORITY_NONE;
   _wavBytesLeft = 0;
+  _wavSampleRate = 0;
   _bufferSize = 0;
   _bufferOffset = 0;
   _toneCount = 0;
@@ -95,43 +206,75 @@ void AudioManager::stop() {
 
 bool AudioManager::openWav(const char *path) {
   _file = SD.open(path, FILE_READ);
-  if (!_file) return false;
-  if (!readTag(_file, "RIFF")) return false;
-  (void)readLe32(_file);
-  if (!readTag(_file, "WAVE")) return false;
-
-  bool formatOk = false;
-  while (_file.available()) {
-    char chunk[4];
-    if (_file.read((uint8_t *)chunk, sizeof(chunk)) != sizeof(chunk)) break;
-    uint32_t chunkSize = readLe32(_file);
-    uint32_t next = _file.position() + chunkSize + (chunkSize & 1U);
-
-    if (memcmp(chunk, "fmt ", 4) == 0 && chunkSize >= 16) {
-      uint16_t encoding = readLe16(_file);
-      uint16_t channels = readLe16(_file);
-      uint32_t rate = readLe32(_file);
-      (void)readLe32(_file);
-      (void)readLe16(_file);
-      uint16_t bits = readLe16(_file);
-      formatOk = encoding == 1 && channels == 1 &&
-                 rate == SPEAKER_SAMPLE_RATE && bits == 16;
-    } else if (memcmp(chunk, "data", 4) == 0) {
-      if (!formatOk) break;
-      _wavBytesLeft = chunkSize;
-      return true;
+  if (!_file) {
+    File root = SD.open("/");
+    File found;
+    if (findFileRecursive(root, baseName(path), found, 3)) {
+      _file = found;
+      Serial.printf("[audio] %s not found; using discovered file %s\n", path,
+                    _file.name());
     }
-    _file.seek(next);
+    if (root) root.close();
   }
 
-  _file.close();
-  return false;
+  if (!_file) {
+    Serial.printf("[audio] file not found anywhere on card: %s\n", path);
+    return false;
+  }
+
+  WavInfo wav;
+  if (!readWavHeader(_file, wav)) {
+    Serial.printf("[audio] invalid RIFF/WAVE header: %s\n", _file.name());
+    _file.close();
+    return false;
+  }
+  if (wav.encoding != 1 || wav.channels != 1 || wav.bits != 16) {
+    Serial.printf("[audio] unsupported WAV %s: format=%u channels=%u bits=%u\n",
+                  _file.name(), wav.encoding, wav.channels, wav.bits);
+    _file.close();
+    return false;
+  }
+  if (wav.sampleRate < 8000 || wav.sampleRate > 48000) {
+    Serial.printf("[audio] unsupported WAV rate %lu Hz: %s\n",
+                  (unsigned long)wav.sampleRate, _file.name());
+    _file.close();
+    return false;
+  }
+
+  if (wav.sampleRate != SPEAKER_SAMPLE_RATE) {
+    esp_err_t err = i2s_set_clk(_port, wav.sampleRate,
+                                I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
+    if (err != ESP_OK) {
+      Serial.printf("[audio] cannot set %lu Hz I2S clock: %d\n",
+                    (unsigned long)wav.sampleRate, (int)err);
+      _file.close();
+      return false;
+    }
+  }
+
+  _wavSampleRate = wav.sampleRate;
+  _wavBytesLeft = wav.dataSize;
+  Serial.printf("[audio] WAV mono PCM, %lu Hz, 16-bit, %lu data bytes\n",
+                (unsigned long)wav.sampleRate,
+                (unsigned long)wav.dataSize);
+  return true;
 }
 
 bool AudioManager::playWav(const char *path, AudioPriority priority) {
-  if (!_sdReady || !claim(priority, PLAY_WAV)) return false;
+  if (!_sdReady) {
+    Serial.printf("[audio] cannot play %s: microSD is not mounted\n", path);
+    return false;
+  }
+  if (!_ampReady) {
+    Serial.printf("[audio] cannot play %s: amplifier/I2S is unavailable\n", path);
+    return false;
+  }
+  if (!claim(priority, PLAY_WAV)) {
+    Serial.printf("[audio] cannot play %s: higher-priority audio is active\n",
+                  path);
+    return false;
+  }
   if (!openWav(path)) {
-    Serial.printf("[audio] invalid or missing WAV: %s\n", path);
     finish();
     return false;
   }

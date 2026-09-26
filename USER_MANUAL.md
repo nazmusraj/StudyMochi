@@ -1,7 +1,7 @@
 # StudyMochi User Manual
 
 StudyMochi is a Bengali-speaking desk companion with a clock, weather display,
-countdown timer, stopwatch, voice assistant, six-orientation Pomodoro timer,
+countdown timer, stopwatch, voice assistant, orientation Pomodoro timer,
 and an interactive pet.
 
 ## 1. Important safety information
@@ -41,17 +41,48 @@ The four main modes repeat in this order:
 | Current screen | Short tap | Hold for 2 seconds |
 |---|---|---|
 | Clock/weather | No action | No action |
-| Countdown setup | Add 5 minutes | Start countdown |
-| Countdown running | No action | Pause or resume |
-| Countdown finished | Clear timer | Clear timer |
+| Countdown timer | Start, pause, or resume | Add 5 minutes |
 | Stopwatch | Start or pause | Reset to zero |
 | AI assistant | Start or stop listening | Start or stop listening |
-| Pet Pomodoro | Happy reaction | Sad reaction |
+| Pet Pomodoro | Angry reaction | Sad reaction |
 
-Three quick head taps within approximately 1.5 seconds produce the angry pet
+Three quick head taps within approximately 1.5 seconds produce the happy pet
 reaction. Pet gestures work only in Pet Pomodoro mode.
+On the countdown page, three quick head taps reset the timer to zero.
 
 ## 3. First-time setup
+
+### Create a Gemini API key
+
+Each owner should use their own Gemini API key. The key identifies the owner's
+Google project and its quota or billing; it does not define StudyMochi's
+personality. StudyMochi supplies its tutoring style automatically.
+
+1. On the phone, open the [Google AI Studio API Keys page](https://aistudio.google.com/apikey).
+2. Sign in with a Google account and accept the requested terms.
+3. Select **Create API key**.
+4. Use the default project or create a new project when prompted.
+5. Select **Copy** beside the new key. Keep it private and do not post it in a
+   message, screenshot, public repository, or video.
+
+New accounts normally begin with the Gemini API Free Tier, subject to Google's
+current model availability and rate limits. Billing is optional unless Google
+requires it for the selected model or the owner needs higher limits. Refer to
+the official [Gemini API billing guide](https://ai.google.dev/gemini-api/docs/billing)
+for current details.
+
+No custom model, prompt, voice, or audio configuration is required in Google
+AI Studio. A key created through Google AI Studio is sufficient. If an owner
+creates a key directly in Google Cloud instead, the Generative Language API
+must be enabled for that project. When possible, restrict the key so it can be
+used only with the Generative Language API.
+
+If a key is exposed or the device is lost, delete that key from Google AI
+Studio and create a replacement. Free-tier requests may be handled under
+different data-use terms from paid-tier requests; consult Google's current
+terms before transmitting private or sensitive conversations.
+
+### Connect StudyMochi
 
 1. Insert the prepared microSD card before switching on the device.
 2. Connect the 5 V power supply.
@@ -112,16 +143,14 @@ minutes when Wi-Fi is available.
 ### Countdown timer
 
 1. Select Timer mode and make sure the countdown page is visible.
-2. Tap the head sensor once to select 5 minutes.
-3. Continue tapping to select 10, 15, 20, and so on up to 60 minutes.
-4. Holding the head sensor starts the selected countdown.
-5. Hold again while running to pause. Hold once more to resume.
+2. Hold the head sensor for two seconds to select 5 minutes.
+3. Continue using long presses to select 10, 15, 20, and so on up to 60
+   minutes. After 60 minutes, the next long press returns to 5 minutes.
+4. Tap the head sensor once to start the selected countdown.
+5. Tap once while running to pause. Tap once more to resume.
 6. When time expires, the display flashes and the buzzer plays the completion
    pattern.
-7. Tap or hold the head sensor to clear the completed timer.
-
-After 60 minutes, another setup tap returns the selection to zero and cancels
-the setup.
+7. Tap three times quickly at any point to stop and reset the timer to zero.
 
 ### Stopwatch
 
@@ -146,6 +175,32 @@ API key.
 The on-board BOOT button is also available as a hold-to-talk backup. A low
 error pattern means the online AI session is not ready.
 
+### How StudyMochi gets its context
+
+The Gemini API key only authorizes the connection. It does not contain a user
+profile or automatically customize Gemini. StudyMochi shapes each conversation
+from four sources:
+
+1. **StudyMochi instruction:** When an online session opens, the firmware tells
+   Gemini to act as Mochi, a patient BUET EEE tutor; answer in conversational
+   Bangla; retain English technical terms; give the direct answer first; speak
+   mathematics instead of using LaTeX; and keep the response concise. Every
+   valid user's API key receives this same instruction.
+2. **Current speech:** Microphone audio is sent to the Gemini Live session while
+   listening is active. Gemini interprets that speech as the current request.
+3. **Current-session conversation:** Gemini can use earlier questions and
+   answers from the same connected Live session, allowing follow-up questions
+   such as “explain the second part again.” This temporary context is lost when
+   the session disconnects or the device restarts.
+4. **Gemini's model knowledge:** Gemini uses knowledge learned during its model
+   training. StudyMochi does not automatically send the contents of the SD
+   card, current timer, weather screen, or personal files to Gemini.
+
+To personalize answers further, the firmware would need to collect settings
+such as the learner's name, education level, preferred language, subjects, and
+response length, then include those settings in the session instruction. They
+cannot be configured through the API key itself.
+
 ## 8. Mode 4: Pet Pomodoro
 
 Each physical orientation selects a different automatic Pomodoro profile.
@@ -157,7 +212,7 @@ Each physical orientation selects a different automatic Pomodoro profile.
 | Physical back side | X+ | Sprint 15/3 |
 | Physical left side | Y+ | Extended 90/20 |
 | Physical front side | X- | Balanced 30/5 |
-| Upside down | Z+ | Focus 60/10 |
+| Display/OLED down | Z+ | Stop/reset all timers; screen and audio off |
 
 To start a session:
 
@@ -172,13 +227,13 @@ Pomodoro mode also stops and resets the session.
 
 The timer display automatically rotates after the new orientation has been
 stable for approximately 700 ms. Right and left placements use a portrait
-layout; opposite faces use a 180-degree layout where required. This keeps the
-timer and text horizontal for each of the six calibrated placements.
+layout; opposite active faces use a 180-degree layout where required. This
+keeps the timer and text horizontal for each active placement.
 
 During the session:
 
-- One head tap shows the happy face and plays the happy buzzer pattern.
-- Three quick head taps show the angry face and play the angry pattern.
+- One head tap shows the angry face and plays the angry buzzer pattern.
+- Three quick head taps show the happy face and play the happy pattern.
 - A two-second head hold shows the sad face and plays the sad pattern.
 - The timer continues while a pet face is displayed.
 - A side tap dismisses the pet face and returns to the timer.
@@ -197,8 +252,10 @@ do-not-disturb:
 - Active timers continue in the background.
 
 Return the device to another orientation to restore the display and sound.
-In Pet Pomodoro mode, upside down is the sixth Pomodoro profile and does not
-activate do-not-disturb.
+In Pet Pomodoro mode, placing the display downward stops and resets the
+Pomodoro, normal countdown, and stopwatch. It also turns off the display,
+speaker, and passive buzzer. Returning it to an active face starts a fresh
+10-second Pomodoro arming countdown.
 
 ## 10. microSD card requirements
 
@@ -242,6 +299,9 @@ Factory reset cannot be undone. Do not use it for an ordinary restart.
 - Connect the speaker only to `SPK+` and `SPK-`.
 - Check that the SD card is inserted and contains the required WAV files.
 - Verify Wi-Fi and the API key if Gemini speech is also unavailable.
+- In Serial Monitor, enter `i` to inspect amplifier/SD status, `s` to test the
+  MAX98357A with a generated tone, and `a` to play a WAV directly from the SD
+  card. Check the `[audio]` log for a missing file, failed mount, or I2S error.
 
 ### Clock works but weather or AI does not
 

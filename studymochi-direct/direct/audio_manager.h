@@ -70,6 +70,7 @@ private:
 
   File _file;
   uint32_t _wavBytesLeft = 0;
+  uint32_t _wavSampleRate = 0;
   uint8_t _buffer[512] = {0};
   size_t _bufferSize = 0;
   size_t _bufferOffset = 0;

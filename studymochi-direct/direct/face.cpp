@@ -628,7 +628,7 @@ static void drawMouth(uint8_t step) {
     case FACE_WAITING:
     case FACE_SAD:                                // Inverted curve — sad mouth
       for (int dx = -7; dx <= 7; dx++) {
-        int y = mcy + (49 - dx * dx) / 18;
+        int y = mcy - (49 - dx * dx) / 18;
         px(mcx + dx, y, true); px(mcx + dx, y + 1, true);
       }
       break;
@@ -638,9 +638,9 @@ static void drawMouth(uint8_t step) {
       fillRect(mcx - 4, mcy - 1, 9, 3, false);
       break;
 
-    default:                                      // Sweet resting smile
+    default:                                      // Sweet resting smile — upward-curved mouth
       for (int dx = -11; dx <= 11; dx++) {
-        int y = mcy + 4 - (121 - dx * dx) / 22;
+        int y = mcy - 2 + (121 - dx * dx) / 22;
         px(mcx + dx, y, true); px(mcx + dx, y + 1, true);
       }
       px(mcx - 13, mcy - 2, true); px(mcx - 13, mcy - 1, true);
